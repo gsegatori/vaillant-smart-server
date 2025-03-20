@@ -73,6 +73,7 @@ def api_zone_update(index, mode):
 
 @app.route('/zone-set-temp/<int:index>/<float:temp>', methods=['GET'])
 def api_zone_set_temp(index, temp):
+    logging.debug(f"Setting temperature for zone {index} to {temp}°C")
     future = asyncio.run_coroutine_threadsafe(vaillant_client.update_zone_temperature(index, temp), loop)
     result = future.result()
     return jsonify(result)
