@@ -18,8 +18,8 @@ This is a Flask-based API server that integrates with the **MyPyllant** library 
 
 1. **Clone the repository:**
    ```sh
-   git clone <repository-url>
-   cd <repository-folder>
+   git clone https://github.com/gsegatori/vaillant-smart-server.git
+   cd vaillant-smart-server
    ```
 
 2. **Create a virtual environment:**
