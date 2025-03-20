@@ -57,9 +57,6 @@ gunicorn -w 4 -b 0.0.0.0:5000 app:app
 
 ## API Endpoints
 
-### Authentication
-- **`GET /test`** - Ensures authentication is valid
-
 ### Boiler Consumption
 - **`GET /boiler-consumption/<year>/<month>`** - Get gas consumption for a specific month
 - **`GET /boiler-consumption-current-month`** - Get gas consumption for the current month
@@ -90,5 +87,5 @@ Feel free to contribute by submitting a pull request or reporting issues.
 
 ---
 ### Author
-Developed by Giorgio Segatori.
+Developed by [Your Name].
 
