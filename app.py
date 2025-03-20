@@ -21,21 +21,26 @@ app = Flask(__name__)
 
 loop = asyncio.new_event_loop()
 
+
 def start_loop():
     asyncio.set_event_loop(loop)
     loop.run_forever()
 
+
 threading.Thread(target=start_loop, daemon=True).start()
+
 
 @app.route('/favicon.ico')
 def favicon():
     return '', 204
+
 
 @app.route('/boiler-consumption/<int:year>/<int:month>', methods=['GET'])
 def api_boiler_consumption(year, month):
     future = asyncio.run_coroutine_threadsafe(vaillant_client.get_gas_consumption(month, year), loop)
     result = future.result()
     return jsonify(result)
+
 
 @app.route('/boiler-consumption-current-month', methods=['GET'])
 def api_boiler_consumption_current_month():
@@ -44,11 +49,13 @@ def api_boiler_consumption_current_month():
     result = future.result()
     return jsonify(result)
 
+
 @app.route('/zones', methods=['GET'])
 def api_zones():
     future = asyncio.run_coroutine_threadsafe(vaillant_client.get_zones(), loop)
     result = future.result()
     return jsonify(result)
+
 
 @app.route('/zone-info/<int:index>', methods=['GET'])
 def api_zone_info(index):
@@ -56,11 +63,13 @@ def api_zone_info(index):
     result = future.result()
     return jsonify(result)
 
+
 @app.route('/zone-update/<int:index>/<string:mode>', methods=['GET'])
 def api_zone_update(index, mode):
     future = asyncio.run_coroutine_threadsafe(vaillant_client.update_zone_mode(index, mode), loop)
     result = future.result()
     return jsonify(result)
+
 
 @app.route('/zone-set-temp/<int:index>/<float:temp>', methods=['GET'])
 def api_zone_set_temp(index, temp):
@@ -68,17 +77,20 @@ def api_zone_set_temp(index, temp):
     result = future.result()
     return jsonify(result)
 
+
 @app.route('/get-water-pressure', methods=['GET'])
 def api_get_water_pressure():
     future = asyncio.run_coroutine_threadsafe(vaillant_client.get_water_pressure(), loop)
     result = future.result()
     return jsonify(result)
 
+
 @app.route('/get-system-info', methods=['GET'])
 def api_get_system_info():
     future = asyncio.run_coroutine_threadsafe(vaillant_client.get_system_info(), loop)
     result = future.result()
     return jsonify(result)
+
 
 def shutdown_server(signal, frame):
     logging.info("Shutdown signal received. Closing HTTP session...")

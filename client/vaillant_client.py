@@ -33,6 +33,7 @@ async def init_api():
         logging.info("API initialized.")
     return api
 
+
 async def ensure_authenticated():
     if api is None:
         await init_api()
@@ -142,6 +143,7 @@ async def update_zone_mode(zone_index, mode):
     logging.error(f"Zone {zone_index} not found")
     return {"error": "Zone not found"}
 
+
 async def update_zone_temperature(zone_index, temperature):
     logging.debug(f"Setting temperature for zone {zone_index} to {temperature}°C")
     await ensure_authenticated()
@@ -160,6 +162,7 @@ async def update_zone_temperature(zone_index, temperature):
     logging.error(f"Zone {zone_index} not found")
     return {"error": "Zone not found"}
 
+
 async def get_system_info():
     await ensure_authenticated()
     async for system in api.get_systems():
@@ -176,8 +179,10 @@ async def get_system_info():
 
     return {"error": "No system found"}
 
+
 if __name__ == "__main__":
     import asyncio
+
 
     async def main():
         logging.info("Initializing API...")
@@ -193,7 +198,6 @@ if __name__ == "__main__":
 
         result = await get_system_info()
         print(result)
-
 
         if api is not None:
             await api.aiohttp_session.close()
