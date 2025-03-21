@@ -164,7 +164,6 @@ async def get_zone_flow_temperature(index):
 
 
 async def update_zone_mode(zone_index, mode):
-    logging.debug(f"Updating zone {zone_index} mode to {mode}")
     await ensure_authenticated()
 
     async for system in api.get_systems():
@@ -178,28 +177,22 @@ async def update_zone_mode(zone_index, mode):
             new_mode = mode_map.get(mode.lower())
 
             if new_mode is None:
-                logging.error(f"Invalid mode: {mode}")
                 return {"error": "Invalid mode"}
 
             try:
                 url = f"{await api.get_system_api_base(zone.system_id)}/zones/{zone.index}/heating-operation-mode"
-                await api.aiohttp_session.patch(
-                    url,
-                    json={"operationMode": new_mode.name},
-                    headers=api.get_authorized_headers(),
-                )
-                logging.debug(f"Zone {zone.name} mode updated to {mode}")
+                await api.aiohttp_session.patch(url, json={"operationMode": new_mode.name},
+                                                headers=api.get_authorized_headers())
+                cache_key = f"zone_info_{zone_index}"
+                CACHE.pop(cache_key, None)
+                CACHE_TTL.pop(cache_key, None)
                 return {"message": f"Zone {zone.name} mode set to {mode}"}
             except Exception as e:
-                logging.error(f"Failed to update mode for zone {zone.name}: {e}")
                 return {"error": f"Failed to update mode for zone {zone.name}: {e}"}
-
-    logging.error(f"Zone {zone_index} not found")
     return {"error": "Zone not found"}
 
 
 async def update_zone_temperature(zone_index, temperature):
-    logging.debug(f"Setting temperature for zone {zone_index} to {temperature}°C")
     await ensure_authenticated()
 
     async for system in api.get_systems():
@@ -207,13 +200,12 @@ async def update_zone_temperature(zone_index, temperature):
             zone = system.zones[zone_index]
             try:
                 await api.set_manual_mode_setpoint(zone, temperature, "heating")
-                logging.debug(f"Temperature for zone {zone.name} set to {temperature}°C")
+                cache_key = f"zone_info_{zone_index}"
+                CACHE.pop(cache_key, None)
+                CACHE_TTL.pop(cache_key, None)
                 return {"message": f"Temperature for zone {zone.name} set to {temperature}°C"}
             except Exception as e:
-                logging.error(f"Failed to set temperature for zone {zone.name}: {e}")
                 return {"error": f"Failed to set temperature for zone {zone.name}: {e}"}
-
-    logging.error(f"Zone {zone_index} not found")
     return {"error": "Zone not found"}
 
 
@@ -246,6 +238,9 @@ if __name__ == "__main__":
         await init_api()
         result = await get_zone_flow_temperature(0)
         logging.info(f"Zone flow temperature: {result}")
+
+        result = await get_gas_consumption(3, 2025)
+        print(result)
 
         result = await get_system_info()
         print(result)
