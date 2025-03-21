@@ -1,14 +1,14 @@
 import json
 import os
 import logging
+import asyncio
 from datetime import datetime, timedelta, UTC
-from typing import Optional
+from typing import Optional, Dict, Any
 from zoneinfo import ZoneInfo
 
 from myPyllant.api import MyPyllantAPI
 from myPyllant.const import DEFAULT_BRAND
 from myPyllant.enums import DeviceDataBucketResolution, ZoneOperatingMode
-
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -22,6 +22,29 @@ BRAND = os.getenv("VAILLANT_BRAND", DEFAULT_BRAND)
 COUNTRY = os.getenv("VAILLANT_COUNTRY")
 
 api: Optional[MyPyllantAPI] = None
+
+CACHE: Dict[str, Any] = {}
+CACHE_TTL: Dict[str, datetime] = {}
+
+CACHE_TIMES = {
+    "system_info": timedelta(minutes=5),
+    "zone_info": timedelta(minutes=30),
+    "gas_consumption": timedelta(hours=4),
+    "water_pressure": timedelta(minutes=5),
+    "zones": timedelta(minutes=5),
+    "zone_flow_temp": timedelta(minutes=5)
+}
+
+
+def set_cache(key: str, value: Any, ttl: timedelta):
+    CACHE[key] = value
+    CACHE_TTL[key] = datetime.now(UTC) + ttl
+
+
+def get_from_cache(key: str):
+    if key in CACHE and CACHE_TTL[key] > datetime.now(UTC):
+        return CACHE[key]
+    return None
 
 
 async def init_api():
@@ -45,66 +68,97 @@ async def ensure_authenticated():
 
 
 async def get_gas_consumption(month, year):
+    cache_key = f"gas_consumption_{year}_{month}"
+    cached = get_from_cache(cache_key)
+    if cached:
+        return cached
+
     logging.info(f"Fetching gas consumption for {year}-{month}")
     await ensure_authenticated()
     async for system in api.get_systems():
-        if system.devices:
-            for device in system.devices:
-                if device.device_type == "BOILER":
-                    start_date = datetime(year, month, 1)
-                    end_date = datetime(year + 1, 1, 1) - timedelta(seconds=1) if month == 12 else datetime(year,
-                                                                                                            month + 1,
-                                                                                                            1) - timedelta(
-                        seconds=1)
-                    async for data in api.get_data_by_device(device, DeviceDataBucketResolution.MONTH, start_date,
-                                                             end_date):
-                        if data.operation_mode == "DOMESTIC_HOT_WATER" and data.energy_type == "CONSUMED_PRIMARY_ENERGY":
-                            for bucket in data.data:
-                                value_m3 = bucket.value / 10000
-                                logging.info(f"Gas consumption: {value_m3} m³")
-                                return {"consumption_m3": value_m3}
-        return {"error": "No Devices found in this system."}
+        for device in system.devices:
+            if device.device_type == "BOILER":
+                start_date = datetime(year, month, 1)
+                end_date = datetime(year + 1, 1, 1) - timedelta(seconds=1) if month == 12 else datetime(year, month + 1,
+                                                                                                        1) - timedelta(
+                    seconds=1)
+                async for data in api.get_data_by_device(device, DeviceDataBucketResolution.MONTH, start_date,
+                                                         end_date):
+                    if data.operation_mode == "DOMESTIC_HOT_WATER" and data.energy_type == "CONSUMED_PRIMARY_ENERGY":
+                        for bucket in data.data:
+                            value_m3 = bucket.value / 10000
+                            result = {"consumption_m3": value_m3}
+                            set_cache(cache_key, result, CACHE_TIMES["gas_consumption"])
+                            return result
+    return {"error": "No data found"}
 
 
 async def get_water_pressure():
-    logging.info("Fetching water pressure")
+    cache_key = "water_pressure"
+    cached = get_from_cache(cache_key)
+    if cached:
+        return cached
+
     await ensure_authenticated()
     async for system in api.get_systems():
-        return {"pressure": system.water_pressure}
-    return {"error": "No pressure found"}
+        result = {"pressure": system.water_pressure}
+        set_cache(cache_key, result, CACHE_TIMES["water_pressure"])
+        return result
+    return {"error": "No data found"}
 
 
 async def get_zones():
-    logging.info("Fetching zones")
+    cache_key = "zones"
+    cached = get_from_cache(cache_key)
+    if cached:
+        return cached
+
     await ensure_authenticated()
     async for system in api.get_systems():
         zones_info = [{"index": i, "name": zone.name} for i, zone in enumerate(system.zones)]
-        return {"zones": zones_info}
-    return {"error": "No zones found"}
+        result = {"zones": zones_info}
+        set_cache(cache_key, result, CACHE_TIMES["zones"])
+        return result
+    return {"error": "No data found"}
 
 
 async def get_zone_info(zone_index):
-    logging.info(f"Fetching zone info for index {zone_index}")
+    cache_key = f"zone_info_{zone_index}"
+    cached = get_from_cache(cache_key)
+    if cached:
+        return cached
+
     await ensure_authenticated()
     async for system in api.get_systems():
         if 0 <= zone_index < len(system.zones):
             zone = system.zones[zone_index]
-            return {"index": zone_index, "name": zone.name, "current_temperature": zone.current_room_temperature,
-                    "desired_temperature": zone.desired_room_temperature_setpoint,
-                    "heating_state": zone.heating.operation_mode_heating}
+            result = {
+                "index": zone_index,
+                "name": zone.name,
+                "current_temperature": zone.current_room_temperature,
+                "desired_temperature": zone.desired_room_temperature_setpoint,
+                "heating_state": zone.heating.operation_mode_heating
+            }
+            set_cache(cache_key, result, CACHE_TIMES["zone_info"])
+            return result
     return {"error": "Zone not found"}
 
 
 async def get_zone_flow_temperature(index):
-    logging.info(f"Fetching flow temperature for zone {index}")
+    cache_key = f"zone_flow_temp_{index}"
+    cached = get_from_cache(cache_key)
+    if cached:
+        return cached
+
     await ensure_authenticated()
     async for system in api.get_systems():
         if 0 <= index < len(system.zones):
             zone = system.zones[index]
             flow_temp = zone.associated_circuit.current_circuit_flow_temperature
             if flow_temp is not None:
-                logging.info(f"Flow temperature for zone {index}: {flow_temp}°C")
-                return {"flow_temperature": flow_temp}
+                result = {"flow_temperature": flow_temp}
+                set_cache(cache_key, result, CACHE_TIMES["zone_flow_temp"])
+                return result
             return {"error": "Flow temperature not available for this zone"}
     return {"error": "Zone not found"}
 
@@ -164,6 +218,11 @@ async def update_zone_temperature(zone_index, temperature):
 
 
 async def get_system_info():
+    cache_key = "system_info"
+    cached = get_from_cache(cache_key)
+    if cached:
+        return cached
+
     await ensure_authenticated()
     async for system in api.get_systems():
         def serialize(obj):
@@ -175,24 +234,16 @@ async def get_system_info():
                 return obj.__dict__
             return str(obj)
 
-        return json.loads(json.dumps(system, default=serialize, indent=4))
+        result = json.loads(json.dumps(system, default=serialize, indent=4))
+        set_cache(cache_key, result, CACHE_TIMES["system_info"])
+        return result
 
     return {"error": "No system found"}
 
 
 if __name__ == "__main__":
-    import asyncio
-
-
     async def main():
-        logging.info("Initializing API...")
         await init_api()
-        logging.info("API initialized.")
-
-        now = datetime.now()
-        result = await get_gas_consumption(now.month, now.year)
-        logging.info(f"Gas consumption: {result}")
-
         result = await get_zone_flow_temperature(0)
         logging.info(f"Zone flow temperature: {result}")
 
@@ -201,7 +252,6 @@ if __name__ == "__main__":
 
         if api is not None:
             await api.aiohttp_session.close()
-            logging.info("HTTP session closed.")
 
 
     asyncio.run(main())
