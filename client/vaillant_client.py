@@ -38,11 +38,11 @@ CACHE_TIMES = {
 
 def set_cache(key: str, value: Any, ttl: timedelta):
     CACHE[key] = value
-    CACHE_TTL[key] = datetime.utcnow() + ttl
+    CACHE_TTL[key] = datetime.now(UTC) + ttl
 
 
 def get_from_cache(key: str):
-    if key in CACHE and CACHE_TTL[key] > datetime.utcnow():
+    if key in CACHE and CACHE_TTL[key] > datetime.now(UTC):
         return CACHE[key]
     return None
 

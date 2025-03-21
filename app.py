@@ -63,6 +63,12 @@ def api_zone_info(index):
     result = future.result()
     return jsonify(result)
 
+@app.route('/zone-flow-temp/<int:index>', methods=['GET'])
+def api_zone_flow_temp(index):
+    future = asyncio.run_coroutine_threadsafe(vaillant_client.get_zone_flow_temperature(index), loop)
+    result = future.result()
+    return jsonify(result)
+
 
 @app.route('/zone-update/<int:index>/<string:mode>', methods=['GET'])
 def api_zone_update(index, mode):
