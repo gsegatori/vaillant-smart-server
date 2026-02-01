@@ -116,4 +116,4 @@ signal.signal(signal.SIGTERM, shutdown_server)
 
 if __name__ == '__main__':
     logging.info("Starting Flask server...")
-    app.run(debug=False)
+    app.run(debug=True, use_reloader=False)

@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:pypi.org)",
+      "WebFetch(domain:github.com)",
+      "Bash(source:*)",
+      "Bash(pip install:*)",
+      "Bash(lsof:*)",
+      "Bash(netstat:*)",
+      "Bash(ss:*)",
+      "Bash(kill:*)",
+      "Bash(python app.py:*)",
+      "Bash(pkill:*)",
+      "Bash(xargs:*)"
+    ]
+  }
+}
