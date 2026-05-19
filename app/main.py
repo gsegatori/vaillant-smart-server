@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import sys
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable
 
 from fastapi import FastAPI, HTTPException, Request
@@ -15,16 +16,16 @@ from app.client import VaillantClient, VaillantQuotaExceeded
 from app.config import Settings, get_settings
 
 
-def _quota_http_exception(e: VaillantQuotaExceeded) -> HTTPException:
-    return HTTPException(
-        status_code=429,
-        detail={
-            "error": "vaillant_quota_exceeded",
-            "replenish_in": e.replenish_in,
-            "message": f"Quota API Vaillant esaurita, replenish in {e.replenish_in}",
-            "vaillant_message": e.message,
-        },
-    )
+def _parse_replenish_to_seconds(replenish: str) -> int:
+    """Parsa "HH:MM:SS" in secondi totali. Ritorna 0 se non parsabile."""
+    try:
+        parts = replenish.split(":")
+        if len(parts) != 3:
+            return 0
+        h, m, s = (int(p) for p in parts)
+        return h * 3600 + m * 60 + s
+    except (ValueError, AttributeError):
+        return 0
 
 log = logging.getLogger("vaillant")
 
@@ -65,13 +66,40 @@ def create_app(
         system_cache_ttl_s=settings.system_cache_ttl_s,
     )
 
+    async def _quota_resume_loop() -> None:
+        """Background: ogni 30s, se quota_resume_at e' passato, riabilita upstream."""
+        while True:
+            try:
+                await asyncio.sleep(30)
+                resume_at = app.state.quota_resume_at
+                if resume_at is None:
+                    continue
+                now = datetime.now(timezone.utc)
+                if now >= resume_at:
+                    log.info(
+                        "Quota window scaduta (era %s), AUTO-ENABLE upstream",
+                        resume_at.strftime("%H:%M:%S"),
+                    )
+                    app.state.enabled = True
+                    app.state.quota_resume_at = None
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("error in quota_resume_loop")
+
     @asynccontextmanager
     async def _lifespan(_app: FastAPI):
         log.info("vaillant-smart-server up bind=%s:%s", settings.bind_host, settings.bind_port)
+        resume_task = asyncio.create_task(_quota_resume_loop())
         try:
             yield
         finally:
             log.info("vaillant-smart-server shutdown")
+            resume_task.cancel()
+            try:
+                await resume_task
+            except asyncio.CancelledError:
+                pass
             await client.close()
             await cache.persist_now()
 
@@ -80,6 +108,36 @@ def create_app(
     app.state.cache = cache
     app.state.client = client
     app.state.enabled = True  # master kill-switch (default ON)
+    # Se settato (datetime UTC), un background task riabilitera' upstream a
+    # quell'orario. Anche /admin/disable e /admin/enable lo cancellano.
+    app.state.quota_resume_at = None  # datetime | None
+
+    def _trigger_quota_lockout(e: VaillantQuotaExceeded) -> None:
+        secs = _parse_replenish_to_seconds(e.replenish_in)
+        if secs <= 0:
+            log.warning("Quota lockout senza replenish_in parsabile (%s); upstream lasciato com'e'", e.replenish_in)
+            return
+        resume_at = datetime.now(timezone.utc) + timedelta(seconds=secs)
+        was_enabled = app.state.enabled
+        app.state.enabled = False
+        app.state.quota_resume_at = resume_at
+        log.warning(
+            "Auto-DISABLE upstream per quota Vaillant (replenish in %s); riprendo alle %s UTC%s",
+            e.replenish_in, resume_at.strftime("%H:%M:%S"),
+            "" if was_enabled else " (era gia' OFF)",
+        )
+
+    def _quota_http_exception(e: VaillantQuotaExceeded) -> HTTPException:
+        _trigger_quota_lockout(e)
+        return HTTPException(
+            status_code=429,
+            detail={
+                "error": "vaillant_quota_exceeded",
+                "replenish_in": e.replenish_in,
+                "message": f"Quota API Vaillant esaurita, replenish in {e.replenish_in}",
+                "vaillant_message": e.message,
+            },
+        )
 
     @app.middleware("http")
     async def _access_log(request: Request, call_next):
@@ -122,7 +180,14 @@ def create_app(
 
     @app.get("/healthz")
     async def healthz():
-        return {"ok": True, "enabled": app.state.enabled}
+        body: dict[str, Any] = {"ok": True, "enabled": app.state.enabled}
+        resume_at = app.state.quota_resume_at
+        if resume_at is not None:
+            now = datetime.now(timezone.utc)
+            delta_s = max(0, int((resume_at - now).total_seconds()))
+            body["quota_resume_at"] = resume_at.isoformat()
+            body["quota_resume_in_seconds"] = delta_s
+        return body
 
     @app.get("/admin/cache")
     async def admin_cache():
@@ -131,13 +196,20 @@ def create_app(
     @app.post("/admin/enable")
     async def admin_enable():
         app.state.enabled = True
-        log.info("upstream ENABLED")
+        if app.state.quota_resume_at is not None:
+            app.state.quota_resume_at = None
+            log.info("upstream ENABLED (manual override del quota auto-resume)")
+        else:
+            log.info("upstream ENABLED")
         return {"enabled": True}
 
     @app.post("/admin/disable")
     async def admin_disable():
         app.state.enabled = False
-        log.info("upstream DISABLED (cache-only mode)")
+        # Manuale: cancello eventuale auto-resume cosi' resta OFF finche'
+        # l'utente decide diversamente.
+        app.state.quota_resume_at = None
+        log.info("upstream DISABLED (cache-only mode, auto-resume cancellato)")
         return {"enabled": False}
 
     @app.post("/admin/clear-cache")
@@ -291,8 +363,9 @@ INDEX_HTML = """<!doctype html>
 <h1>Vaillant Smart Server <small>v0.2.0</small></h1>
 
 <div id="quota-banner" class="quota-banner">
-  &#9888; Vaillant ha esaurito la quota API. Replenish in <span id="quota-time">--:--:--</span>.
-  Master messo automaticamente OFF dalla UI non e' necessario, ma puoi farlo manualmente per fermare ulteriori tentativi.
+  &#9888; Vaillant ha esaurito la quota API. Auto-resume tra <span id="quota-time">--:--:--</span>.
+  L'upstream e' stato messo OFF automaticamente; al replenish il server ri-abilita da solo.
+  Manualmente puoi forzare l'abilitazione (Enable) o tenerla OFF (Disable) — entrambi annullano il timer auto-resume.
 </div>
 
 <div class="panel">
@@ -340,6 +413,14 @@ INDEX_HTML = """<!doctype html>
 </div>
 
 <script>
+function formatHMS(totalSec) {
+  totalSec = Math.max(0, Math.floor(totalSec));
+  const h = Math.floor(totalSec / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
+  const s = totalSec % 60;
+  return String(h).padStart(2,'0') + ':' + String(m).padStart(2,'0') + ':' + String(s).padStart(2,'0');
+}
+
 async function refreshStatus() {
   try {
     const r = await fetch('/healthz');
@@ -347,6 +428,13 @@ async function refreshStatus() {
     const el = document.getElementById('master-state');
     if (d.enabled) { el.textContent = 'ON';  el.className = 'pill on'; }
     else            { el.textContent = 'OFF'; el.className = 'pill off'; }
+
+    // Aggiorna il banner auto-resume
+    if (typeof d.quota_resume_in_seconds === 'number' && d.quota_resume_in_seconds > 0) {
+      showQuotaBanner(formatHMS(d.quota_resume_in_seconds));
+    } else {
+      hideQuotaBanner();
+    }
   } catch (e) {
     document.getElementById('master-state').textContent = 'unreachable';
   }

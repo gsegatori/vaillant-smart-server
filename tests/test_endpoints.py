@@ -148,6 +148,44 @@ def test_quota_returns_429_with_detail(client, fake_client):
     assert "5:23" in body["detail"]["message"]
 
 
+def test_quota_triggers_auto_lockout(client, fake_client):
+    """Quota exception -> master messo automaticamente a OFF + quota_resume_at settato."""
+    fake_client.force_quota = ("00:10:00", "test")
+    r = client.get("/zones")
+    assert r.status_code == 429
+    # ora healthz deve mostrare enabled=False + quota_resume_in_seconds ~600
+    h = client.get("/healthz").json()
+    assert h["enabled"] is False
+    assert "quota_resume_in_seconds" in h
+    assert 595 <= h["quota_resume_in_seconds"] <= 600
+
+
+def test_admin_enable_cancels_quota_timer(client, fake_client):
+    """Manual /admin/enable durante un lockout cancella il timer auto-resume."""
+    fake_client.force_quota = ("00:30:00", "test")
+    client.get("/zones")  # triggers lockout
+    assert client.get("/healthz").json()["enabled"] is False
+    # ora abilito manualmente
+    fake_client.force_quota = None  # non vogliamo che la prossima call rilanci
+    r = client.post("/admin/enable")
+    assert r.json() == {"enabled": True}
+    h = client.get("/healthz").json()
+    assert h["enabled"] is True
+    assert "quota_resume_in_seconds" not in h  # timer cancellato
+
+
+def test_admin_disable_cancels_quota_timer(client, fake_client):
+    """Disable manuale cancella anch'esso il timer auto-resume."""
+    fake_client.force_quota = ("00:15:00", "test")
+    client.get("/zones")
+    assert client.get("/healthz").json()["enabled"] is False
+    r = client.post("/admin/disable")
+    assert r.json() == {"enabled": False}
+    h = client.get("/healthz").json()
+    assert h["enabled"] is False
+    assert "quota_resume_in_seconds" not in h
+
+
 def test_quota_with_stale_cache_serves_stale(client, fake_client):
     """Cache popolata + quota esaurita -> 200 con valore stale (no 429)."""
     # primo fetch popola cache
