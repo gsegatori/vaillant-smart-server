@@ -48,9 +48,11 @@ fi
 echo "[4/6] stop container precedente..."
 docker compose down 2>/dev/null || true
 
-# --- 5) build + up ---
+# --- 5) build + up + cleanup immagini orfane ---
 echo "[5/6] build + up (host network)..."
 docker compose up -d --build
+echo "       cleanup immagini dangling..."
+docker image prune -f >/dev/null 2>&1 || true
 
 # --- 6) attendi healthy ---
 echo "[6/6] attendo healthy..."
