@@ -267,6 +267,15 @@ INDEX_HTML = """<!doctype html>
                   padding: .8em 1em; border-radius: 5px; margin: 1em 0;
                   display: none; font-weight: 600; }
   .quota-banner.show { display: block; }
+  .zone-card { background: #f5f5f7; border-radius: 6px; padding: .9em 1em;
+               margin: .6em 0; }
+  .zone-card h3 { margin: 0 0 .4em; font-size: 1.05em; color: #333; }
+  .zone-row { display: flex; flex-wrap: wrap; gap: 1.2em; margin: .2em 0; font-size: .92em; }
+  .zone-row .label { color: #777; font-size: .85em; display: block; }
+  .zone-row .val { font-weight: 600; }
+  .zone-actions { margin-top: .6em; }
+  .zone-actions input[type=number] { width: 5em; padding: .35em; border: 1px solid #ccc;
+                                     border-radius: 4px; font-size: .92em; }
   table { border-collapse: collapse; width: 100%; margin-top: .5em; }
   th, td { padding: .45em .7em; border-bottom: 1px solid #eee; text-align: left; font-size: .9em; }
   th { background: #f5f5f7; font-weight: 600; }
@@ -295,6 +304,13 @@ INDEX_HTML = """<!doctype html>
   </p>
   <p><small class="muted">Quando OFF, il server serve solo dalla cache (anche scaduta) e <strong>non chiama Vaillant</strong>.
     Usalo per liberare l'API mentre usi l'app myVaillant ufficiale o quando hai sforato la quota.</small></p>
+</div>
+
+<div class="panel">
+  <h2>Zone</h2>
+  <button onclick="refreshZones()">&#8635; Ricarica</button>
+  <div id="zones-list"><em>caricamento...</em></div>
+  <p><small class="muted">Questi sono i valori esatti che il server ritorna. Se OH mostra qualcosa di diverso, e' il binding HTTP che non ha ancora finito un refresh — entro 30s sara' allineato.</small></p>
 </div>
 
 <div class="panel">
@@ -379,6 +395,99 @@ function hideQuotaBanner() {
   document.getElementById('quota-banner').classList.remove('show');
 }
 
+async function handleResponse(r) {
+  // restituisce {ok, status, body, quotaReplenish}
+  const text = await r.text();
+  let body = null;
+  try { body = JSON.parse(text); } catch (e) { body = text; }
+  let quotaReplenish = null;
+  if (r.status === 429 && body && body.detail && body.detail.replenish_in) {
+    quotaReplenish = body.detail.replenish_in;
+    showQuotaBanner(quotaReplenish);
+  } else if (r.ok) {
+    hideQuotaBanner();
+  }
+  return { ok: r.ok, status: r.status, body, quotaReplenish };
+}
+
+const MODE_PILL = { OFF: 'off', MANUAL: 'on', TIME_CONTROLLED: 'fresh' };
+const MODE_LABEL = { off: 'Off', manual: 'Manuale', time_controlled: 'Programma' };
+
+async function refreshZones() {
+  const out = document.getElementById('zones-list');
+  try {
+    const zsR = await fetch('/zones');
+    const zs = await zsR.json();
+    if (!Array.isArray(zs)) {
+      out.textContent = 'risposta inattesa da /zones: ' + JSON.stringify(zs);
+      return;
+    }
+    const infos = await Promise.all(zs.map(z =>
+      fetch('/zone-info/' + z.index).then(r => r.json())
+    ));
+    out.innerHTML = zs.map((z, i) => renderZone(z, infos[i])).join('');
+  } catch (e) {
+    out.textContent = 'errore: ' + e.message;
+  }
+}
+
+function renderZone(z, info) {
+  const idx = z.index;
+  const mode = (info && info.heating_state) || '?';
+  const pillCls = MODE_PILL[mode] || 'unknown';
+  const curT = info && typeof info.current_temperature === 'number'
+    ? info.current_temperature.toFixed(2) + ' °C' : '?';
+  const spT  = info && typeof info.desired_temperature === 'number'
+    ? info.desired_temperature.toFixed(1) + ' °C' : '?';
+  return '<div class="zone-card" id="zone-' + idx + '">' +
+    '<h3>' + (z.name || ('Zone ' + idx)) + ' <small class="muted">[idx=' + idx + ']</small></h3>' +
+    '<div class="zone-row">' +
+      '<div><span class="label">Temperatura</span><span class="val">' + curT + '</span></div>' +
+      '<div><span class="label">Setpoint</span><span class="val">' + spT + '</span></div>' +
+      '<div><span class="label">Modalita'</span><span class="pill ' + pillCls + '">' + mode + '</span></div>' +
+    '</div>' +
+    '<div class="zone-actions">' +
+      'Modalita': ' +
+      '<button onclick="setZoneMode(' + idx + ', \'off\')">Off</button>' +
+      '<button onclick="setZoneMode(' + idx + ', \'manual\')">Manuale</button>' +
+      '<button onclick="setZoneMode(' + idx + ', \'time_controlled\')">Programma</button>' +
+    '</div>' +
+    '<div class="zone-actions">' +
+      'Setpoint: ' +
+      '<input type="number" id="sp-' + idx + '" value="' + (info && info.desired_temperature ? info.desired_temperature : 20) + '" step="0.5" min="5" max="30">&deg;C ' +
+      '<button onclick="setZoneSetpoint(' + idx + ')">Imposta</button>' +
+      '<small class="muted"> (richiede modalita' Manuale)</small>' +
+    '</div>' +
+  '</div>';
+}
+
+async function setZoneMode(idx, mode) {
+  const r = await fetch('/zone-update/' + idx + '/' + mode);
+  const res = await handleResponse(r);
+  if (!res.ok) {
+    alert('Errore ' + res.status + ': ' + JSON.stringify(res.body));
+    return;
+  }
+  setTimeout(refreshZones, 500);
+  setTimeout(refreshCache, 800);
+}
+
+async function setZoneSetpoint(idx) {
+  const val = document.getElementById('sp-' + idx).value;
+  if (!val || isNaN(parseFloat(val))) {
+    alert('setpoint non valido: ' + val);
+    return;
+  }
+  const r = await fetch('/zone-set-temp/' + idx + '/' + val);
+  const res = await handleResponse(r);
+  if (!res.ok) {
+    alert('Errore ' + res.status + ': ' + JSON.stringify(res.body));
+    return;
+  }
+  setTimeout(refreshZones, 500);
+  setTimeout(refreshCache, 800);
+}
+
 async function probe(path) {
   const out = document.getElementById('probe-out');
   out.textContent = 'GET ' + path + '\\n...';
@@ -414,8 +523,10 @@ async function probe(path) {
 
 refreshStatus();
 refreshCache();
+refreshZones();
 setInterval(refreshStatus, 10000);
 setInterval(refreshCache, 30000);
+setInterval(refreshZones, 30000);
 </script>
 </body>
 </html>
