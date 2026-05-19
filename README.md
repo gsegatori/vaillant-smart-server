@@ -60,6 +60,8 @@ docker compose restart vaillant-smart-server
 
 Aggiornamenti successivi (Plex-style): `cd ~/vaillant-smart-server && ./update.sh`.
 
+⚠ Se modifichi solo `.env` (senza `git pull`), **NON usare** `docker compose restart` — Docker Compose non rilegge il file env su restart. Usa `docker compose up -d --force-recreate` (oppure `./update.sh` che fa già `down + up -d --build`).
+
 ## Tuning TTL
 
 Vaillant non documenta i rate limit, ma spammando ti banna per ~ore. I default sono conservativi. Se vuoi cambiarli, edita le variabili `CACHE_TTL_*` nel `.env` (in secondi). Esempio: gas consumption a 24h se il grafico mensile basta aggiornato 1×/giorno → `CACHE_TTL_GAS=86400`.
