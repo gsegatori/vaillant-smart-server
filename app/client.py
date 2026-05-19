@@ -52,14 +52,35 @@ class VaillantClient:
 
     async def _ensure_authenticated(self) -> MyPyllantAPI:
         async with self._login_lock:
-            if self._api is None:
-                log.info("Vaillant API: first login")
-                self._api = MyPyllantAPI(self._user, self._password, self._brand, self._country)
-                await self._api.login()
-                log.info("Vaillant API: login OK, expires=%s", self._api.oauth_session_expires.isoformat())
-            elif self._api.oauth_session_expires <= datetime.now(UTC):
-                log.info("Vaillant API: token expired, refreshing")
-                await self._api.refresh_token()
+            # se ho una sessione valida la riuso
+            if self._api is not None:
+                expires = getattr(self._api, "oauth_session_expires", None)
+                if expires is not None and expires > datetime.now(UTC):
+                    return self._api
+                # token scaduto/mancante: provo a fare refresh
+                try:
+                    log.info("Vaillant API: token expired/missing, refreshing")
+                    await self._api.refresh_token()
+                    return self._api
+                except Exception as e:
+                    log.warning("Vaillant API: refresh_token failed (%s), full re-login", e)
+                    try:
+                        await self._api.aiohttp_session.close()
+                    except Exception:
+                        pass
+                    self._api = None
+
+            # full login (solo dopo il successo aggiorno self._api,
+            # cosi' non lasciamo lo stato in mezzo se login fallisce)
+            log.info("Vaillant API: login")
+            api = MyPyllantAPI(self._user, self._password, self._brand, self._country)
+            await api.login()
+            self._api = api
+            expires = getattr(api, "oauth_session_expires", None)
+            log.info(
+                "Vaillant API: login OK, expires=%s",
+                expires.isoformat() if expires else "<None>",
+            )
             return self._api
 
     async def _with_retry(self, coro_factory):
