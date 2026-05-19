@@ -439,26 +439,31 @@ function renderZone(z, info) {
     ? info.current_temperature.toFixed(2) + ' °C' : '?';
   const spT  = info && typeof info.desired_temperature === 'number'
     ? info.desired_temperature.toFixed(1) + ' °C' : '?';
-  return '<div class="zone-card" id="zone-' + idx + '">' +
-    '<h3>' + (z.name || ('Zone ' + idx)) + ' <small class="muted">[idx=' + idx + ']</small></h3>' +
-    '<div class="zone-row">' +
-      '<div><span class="label">Temperatura</span><span class="val">' + curT + '</span></div>' +
-      '<div><span class="label">Setpoint</span><span class="val">' + spT + '</span></div>' +
-      '<div><span class="label">Modalita'</span><span class="pill ' + pillCls + '">' + mode + '</span></div>' +
-    '</div>' +
-    '<div class="zone-actions">' +
-      'Modalita': ' +
-      '<button onclick="setZoneMode(' + idx + ', \'off\')">Off</button>' +
-      '<button onclick="setZoneMode(' + idx + ', \'manual\')">Manuale</button>' +
-      '<button onclick="setZoneMode(' + idx + ', \'time_controlled\')">Programma</button>' +
-    '</div>' +
-    '<div class="zone-actions">' +
-      'Setpoint: ' +
-      '<input type="number" id="sp-' + idx + '" value="' + (info && info.desired_temperature ? info.desired_temperature : 20) + '" step="0.5" min="5" max="30">&deg;C ' +
-      '<button onclick="setZoneSetpoint(' + idx + ')">Imposta</button>' +
-      '<small class="muted"> (richiede modalita' Manuale)</small>' +
-    '</div>' +
-  '</div>';
+  const name = z.name || ('Zone ' + idx);
+  const spVal = (info && typeof info.desired_temperature === 'number') ? info.desired_temperature : 20;
+  // Template literals (backticks) per evitare guai di escaping con apostrofi italiani.
+  return `
+    <div class="zone-card" id="zone-${idx}">
+      <h3>${name} <small class="muted">[idx=${idx}]</small></h3>
+      <div class="zone-row">
+        <div><span class="label">Temperatura</span><span class="val">${curT}</span></div>
+        <div><span class="label">Setpoint</span><span class="val">${spT}</span></div>
+        <div><span class="label">Modalita</span><span class="pill ${pillCls}">${mode}</span></div>
+      </div>
+      <div class="zone-actions">
+        Modalita:
+        <button onclick="setZoneMode(${idx}, 'off')">Off</button>
+        <button onclick="setZoneMode(${idx}, 'manual')">Manuale</button>
+        <button onclick="setZoneMode(${idx}, 'time_controlled')">Programma</button>
+      </div>
+      <div class="zone-actions">
+        Setpoint:
+        <input type="number" id="sp-${idx}" value="${spVal}" step="0.5" min="5" max="30">&deg;C
+        <button onclick="setZoneSetpoint(${idx})">Imposta</button>
+        <small class="muted">(richiede modalita Manuale)</small>
+      </div>
+    </div>
+  `;
 }
 
 async function setZoneMode(idx, mode) {
