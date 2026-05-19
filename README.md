@@ -1,91 +1,104 @@
-# Flask Vaillant API Server
+# vaillant-smart-server
 
-This is a Flask-based API server that integrates with the **MyPyllant** library to provide real-time information about your home automation system, specifically for Vaillant heating systems.
+FastAPI server attorno a [myPyllant](https://github.com/signalkraft/myPyllant). Esposto a OpenHAB per leggere consumo gas, temperature zone, pressione acqua di un sistema Vaillant ibrido (heatpump + boiler) e per impostare modalita'/setpoint.
 
-## Features
-- Retrieve gas consumption data
-- Get and update heating zone information
-- Monitor water pressure
-- Adjust zone temperatures and modes
-- Retrieve system-wide data
+Caratteristiche chiave per **non farsi rate-limitare da Vaillant**:
 
-## Prerequisites
-- **Python 3.12**
-- A valid **Vaillant** account
-- Installed dependencies from `requirements.txt`
+- **Cache persistente su disco** (`/data/cache.json`) — sopravvive ai restart, evita di bombardare l'API al boot.
+- **TTL diverso per ogni tipo di dato**: gas 4h (cambia mensile), zone 5 min, water pressure 10 min, ecc.
+- **Single-flight** per chiave: due richieste concorrenti scatenano una sola chiamata upstream.
+- **Serve-stale-on-error**: se l'API Vaillant ti banna o e' giu', gli endpoint ritornano l'ultimo valore noto invece di errore.
+- **Retry exp-backoff** sui transient (timeout, ClientError, ConnectionError) — default 3 tentativi con `2^attempt` secondi di pausa.
+- **Master kill-switch** (`POST /admin/disable` / `POST /admin/enable`): quando disabilitato, gli endpoint servono solo cache (anche scaduta) e **non chiamano Vaillant** — utile per liberare l'API mentre usi l'app ufficiale myVaillant.
 
-## Installation
+## Endpoint
 
-1. **Clone the repository:**
-   ```sh
-   git clone https://github.com/gsegatori/vaillant-smart-server.git
-   cd vaillant-smart-server
-   ```
+### Compat OpenHAB (URL legacy del progetto v1)
 
-2. **Create a virtual environment:**
-   ```sh
-   python -m venv venv
-   source venv/bin/activate  # On Windows: venv\Scripts\activate
-   ```
+| Verbo | Path | Cache TTL | Output |
+|---|---|---|---|
+| GET | `/boiler-consumption/{year}/{month}` | 4h | breakdown gas per `DOMESTIC_HOT_WATER`/`HEATING` + totale m³ |
+| GET | `/boiler-consumption-current-month` | 4h | uguale al precedente, mese corrente |
+| GET | `/zones` | 30min | lista zone (index, nome) |
+| GET | `/zone-info/{idx}` | 5min | temp corrente, setpoint, heating state |
+| GET | `/zone-flow-temp/{idx}` | 5min | temperatura mandata del circuito |
+| GET | `/zone-update/{idx}/{mode}` | — | imposta `manual`/`off`/`time_controlled`, invalida cache |
+| GET | `/zone-set-temp/{idx}/{temp}` | — | imposta setpoint, invalida cache |
+| GET | `/get-water-pressure` | 10min | pressione bar |
+| GET | `/get-system-info` | 5min | dump intero system serializzato |
 
-3. **Install dependencies:**
-   ```sh
-   pip install -r requirements.txt
-   ```
+### Infra
 
-4. **Create a `.env` file** in the project root and add the following environment variables:
-   ```ini
-   LOG_LEVEL=WARNING
-   VAILLANT_USER=<your-vaillant-username>
-   VAILLANT_PASSWORD=<your-vaillant-password>
-   VAILLANT_BRAND=<your-vaillant-brand>
-   VAILLANT_COUNTRY=<your-vaillant-country>
-   ```
+| Verbo | Path | Cosa fa |
+|---|---|---|
+| GET  | `/healthz` | liveness probe, no chiamate Vaillant |
+| GET  | `/admin/cache` | snapshot stato cache (chiavi, eta', se scaduto) |
+| POST | `/admin/enable` | abilita chiamate upstream |
+| POST | `/admin/disable` | disabilita upstream, serve solo cache |
 
-## Running the Server
+## Setup
 
-### Development Mode
-```sh
-python app.py
+### Locale (dev)
+
+```bash
+cp .env.example .env
+# imposta VAILLANT_USER + VAILLANT_PASSWORD nel .env
+python3.12 -m venv .venv && .venv/bin/pip install -e ".[test]"
+CACHE_FILE=/tmp/vaillant-cache.json BIND_PORT=5001 .venv/bin/python -m app.main
+curl http://localhost:5001/zones
 ```
 
-### Production Mode
-For production, use **Gunicorn** or a similar WSGI server:
-```sh
-gunicorn -w 4 -b 0.0.0.0:5000 app:app
+### Docker (deploy mini PC)
+
+```bash
+git clone git@github.com:gsegatori/vaillant-smart-server.git ~/vaillant-smart-server
+cd ~/vaillant-smart-server
+./update.sh
+nano .env  # VAILLANT_USER, VAILLANT_PASSWORD
+docker compose restart vaillant-smart-server
 ```
 
-## API Endpoints
+Aggiornamenti successivi (Plex-style): `cd ~/vaillant-smart-server && ./update.sh`.
 
-### Boiler Consumption
-- **`GET /boiler-consumption/<year>/<month>`** - Get gas consumption for a specific month
-- **`GET /boiler-consumption-current-month`** - Get gas consumption for the current month
+## Tuning TTL
 
-### Zones Management
-- **`GET /zones`** - Retrieve available heating zones
-- **`GET /zone-info/<index>`** - Get information about a specific heating zone
-- **`GET /zone-update/<index>/<mode>`** - Update zone mode (Options: `off`, `manual`, `time_controlled`)
-- **`GET /zone-set-temp/<index>/<temp>`** - Set the temperature of a specific zone
+Vaillant non documenta i rate limit, ma spammando ti banna per ~ore. I default sono conservativi. Se vuoi cambiarli, edita le variabili `CACHE_TTL_*` nel `.env` (in secondi). Esempio: gas consumption a 24h se il grafico mensile basta aggiornato 1×/giorno → `CACHE_TTL_GAS=86400`.
 
-### System Information
-- **`GET /get-water-pressure`** - Retrieve water pressure
-- **`GET /system-info`** - Get full system information
+## Kill-switch dal sitemap OpenHAB
 
-## Logging
-The log level is defined in the `.env` file using `LOG_LEVEL`. Available log levels:
-- `DEBUG`
-- `INFO`
-- `WARNING`
-- `ERROR`
-- `CRITICAL`
+Pattern (come per Rainbird):
+1. Crea item `Vaillant_Master_Enabled` (Switch) in OH.
+2. Rule che su `received command`:
+   - ON → `executeCommandLine ... curl -X POST http://<host>:5000/admin/enable`
+   - OFF → idem con `/admin/disable`
+3. Sitemap nasconde tutto il resto se `Vaillant_Master_Enabled != ON`.
 
-## License
-This project is licensed under the MIT License.
+Cosi' col tap di un bottone "blocca tutto" liberi Vaillant per usare l'app ufficiale.
 
-## Contribution
-Feel free to contribute by submitting a pull request or reporting issues.
+## Struttura
 
----
-### Author
-Developed by [Your Name].
+```
+app/
+├── __init__.py
+├── config.py         pydantic-settings, lookup .env in piu' posti
+├── cache.py          PersistentCache JSON con TTL/serve-stale/single-flight
+├── client.py         VaillantClient wrapper myPyllant + retry/backoff
+└── main.py           FastAPI app + endpoints + middleware access log
 
+tests/                17 test unitari (cache + endpoint con FakeClient mocked)
+Dockerfile            multi-stage non-root su python:3.12-slim
+docker-compose.yml    host network, healthcheck su /healthz
+update.sh             deploy/auto-update helper (clone -> pull -> rebuild)
+```
+
+## Test
+
+```bash
+.venv/bin/pytest                # 17 test verdi
+```
+
+Niente test che richiede credenziali Vaillant reali; tutti via `FakeVaillantClient` in `tests/conftest.py`. Lo smoke contro Vaillant reale e' a discrezione (`python -m app.main` + curl).
+
+## Storico v1 (legacy)
+
+La v1 era una Flask app con cache solo in-memory (volatile) e nessun serve-stale. Sostituita da questa v2 con FastAPI + cache persistente + kill-switch. Mantenuti tutti gli URL legacy per non rompere le regole OpenHAB esistenti.
