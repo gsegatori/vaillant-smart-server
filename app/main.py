@@ -219,6 +219,19 @@ def create_app(
         log.info("cache cleared (%d entries)", n)
         return {"cleared_entries": n}
 
+    @app.get("/admin/config")
+    async def admin_config():
+        """Dump della config runtime (senza la password). Utile per debug
+        rapido per capire QUALI TTL e parametri stanno effettivamente girando."""
+        d = settings.model_dump()
+        if "vaillant_password" in d:
+            d["vaillant_password"] = "***" if d["vaillant_password"] else "(empty)"
+        # serializza Path come str per JSON
+        for k, v in list(d.items()):
+            if hasattr(v, "__fspath__"):
+                d[k] = str(v)
+        return d
+
     # ──────────────────── endpoint compat OH (URL legacy) ────────────────────
 
     @app.get("/boiler-consumption/{year}/{month}")
