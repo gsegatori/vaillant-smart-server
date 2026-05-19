@@ -8,7 +8,7 @@ from datetime import datetime
 from typing import Any, Awaitable, Callable
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 
 from app.cache import PersistentCache
 from app.client import VaillantClient
@@ -96,6 +96,10 @@ def create_app(
 
     # ──────────────────── infra/admin ────────────────────
 
+    @app.get("/", response_class=HTMLResponse)
+    async def index():
+        return INDEX_HTML
+
     @app.get("/healthz")
     async def healthz():
         return {"ok": True, "enabled": app.state.enabled}
@@ -115,6 +119,13 @@ def create_app(
         app.state.enabled = False
         log.info("upstream DISABLED (cache-only mode)")
         return {"enabled": False}
+
+    @app.post("/admin/clear-cache")
+    async def admin_clear_cache():
+        n = cache.clear()
+        await cache.persist_now()
+        log.info("cache cleared (%d entries)", n)
+        return {"cleared_entries": n}
 
     # ──────────────────── endpoint compat OH (URL legacy) ────────────────────
 
@@ -199,6 +210,159 @@ def create_app(
         return await _cached("system_info", settings.cache_ttl_system_info, client.get_system_info)
 
     return app
+
+
+INDEX_HTML = """<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Vaillant Smart Server</title>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+         max-width: 900px; margin: 2em auto; padding: 0 1em; color: #222; background: #fafafa; }
+  h1 { margin-bottom: .2em; }
+  h1 small { color: #888; font-size: .55em; font-weight: normal; }
+  h2 { border-bottom: 1px solid #ddd; padding-bottom: .3em; margin-top: 1.5em; }
+  .panel { background: white; padding: 1em 1.2em; border-radius: 8px; margin: 1em 0;
+           box-shadow: 0 1px 3px rgba(0,0,0,.05); }
+  button { padding: .5em 1em; margin: .15em .3em .15em 0; border: 1px solid #ccc;
+           background: white; cursor: pointer; border-radius: 5px; font-size: .92em; }
+  button:hover:not(:disabled) { background: #f0f0f0; }
+  button:disabled { opacity: .4; cursor: not-allowed; }
+  button.primary { background: #2c7; color: white; border-color: #2a6; }
+  button.primary:hover:not(:disabled) { background: #2a6; }
+  button.danger { color: #c00; border-color: #faa; }
+  button.danger:hover:not(:disabled) { background: #fee; }
+  .pill { display: inline-block; padding: .15em .65em; border-radius: 100px;
+          font-size: .85em; font-weight: 600; }
+  .pill.on, .pill.fresh { background: #d4f5d4; color: #060; }
+  .pill.off, .pill.expired { background: #fcd; color: #900; }
+  .pill.unknown { background: #ddd; color: #555; }
+  table { border-collapse: collapse; width: 100%; margin-top: .5em; }
+  th, td { padding: .45em .7em; border-bottom: 1px solid #eee; text-align: left; font-size: .9em; }
+  th { background: #f5f5f7; font-weight: 600; }
+  td code { background: #f4f4f6; padding: 1px 6px; border-radius: 3px; font-size: .9em; }
+  pre { background: #1e1e1e; color: #ddd; padding: 1em; border-radius: 5px;
+        overflow-x: auto; font-size: .82em; max-height: 320px; }
+  small.muted { color: #888; }
+</style>
+</head>
+<body>
+
+<h1>Vaillant Smart Server <small>v0.2.0</small></h1>
+
+<div class="panel">
+  <h2>Stato</h2>
+  <p>
+    Master upstream:
+    <span id="master-state" class="pill unknown">caricamento...</span>
+    <button id="btn-enable" class="primary" onclick="enableMaster()">Enable</button>
+    <button id="btn-disable" class="danger" onclick="disableMaster()">Disable</button>
+  </p>
+  <p><small class="muted">Quando OFF, il server serve solo dalla cache (anche scaduta) e <strong>non chiama Vaillant</strong>.
+    Usalo per liberare l'API mentre usi l'app myVaillant ufficiale o quando hai sforato la quota.</small></p>
+</div>
+
+<div class="panel">
+  <h2>Cache</h2>
+  <button onclick="refreshCache()">&#8635; Ricarica</button>
+  <button class="danger" onclick="clearCache()">&#128465; Svuota cache</button>
+  <table id="cache-table">
+    <thead><tr><th>Chiave</th><th>Eta'</th><th>TTL</th><th>Stato</th></tr></thead>
+    <tbody><tr><td colspan="4"><em>caricamento...</em></td></tr></tbody>
+  </table>
+  <p><small class="muted">Le entry "scadute" sono ancora servite (serve-stale) ma al prossimo accesso il server tenta un fetch fresh da Vaillant.</small></p>
+</div>
+
+<div class="panel">
+  <h2>Probe endpoint</h2>
+  <p>
+    <button onclick="probe('/zone-info/0')">/zone-info/0</button>
+    <button onclick="probe('/zone-info/1')">/zone-info/1</button>
+    <button onclick="probe('/zone-info/2')">/zone-info/2</button>
+    <button onclick="probe('/get-water-pressure')">/get-water-pressure</button>
+    <button onclick="probe('/boiler-consumption-current-month')">/boiler-consumption-current-month</button>
+    <button onclick="probe('/boiler-consumption-current-year')">/boiler-consumption-current-year</button>
+    <button onclick="probe('/get-system-info')">/get-system-info</button>
+  </p>
+  <pre id="probe-out">(clicca un endpoint per vederne la risposta)</pre>
+</div>
+
+<script>
+async function refreshStatus() {
+  try {
+    const r = await fetch('/healthz');
+    const d = await r.json();
+    const el = document.getElementById('master-state');
+    if (d.enabled) { el.textContent = 'ON';  el.className = 'pill on'; }
+    else            { el.textContent = 'OFF'; el.className = 'pill off'; }
+  } catch (e) {
+    document.getElementById('master-state').textContent = 'unreachable';
+  }
+}
+async function enableMaster()  { await fetch('/admin/enable',  { method: 'POST' }); refreshStatus(); }
+async function disableMaster() { await fetch('/admin/disable', { method: 'POST' }); refreshStatus(); }
+
+async function refreshCache() {
+  try {
+    const r = await fetch('/admin/cache');
+    const d = await r.json();
+    const tbody = document.querySelector('#cache-table tbody');
+    const keys = Object.keys(d).sort();
+    if (keys.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="4"><em>cache vuota</em></td></tr>';
+      return;
+    }
+    tbody.innerHTML = keys.map(k => {
+      const v = d[k];
+      const cls = v.expired ? 'expired' : 'fresh';
+      const txt = v.expired ? 'scaduta' : 'fresca';
+      return '<tr>' +
+        '<td><code>' + k + '</code></td>' +
+        '<td>' + Math.round(v.age_seconds) + 's</td>' +
+        '<td>' + v.ttl_seconds + 's</td>' +
+        '<td><span class="pill ' + cls + '">' + txt + '</span></td>' +
+      '</tr>';
+    }).join('');
+  } catch (e) {
+    document.querySelector('#cache-table tbody').innerHTML =
+      '<tr><td colspan="4">errore: ' + e.message + '</td></tr>';
+  }
+}
+
+async function clearCache() {
+  if (!confirm('Svuotare TUTTA la cache? Le prossime chiamate andranno fresh a Vaillant.')) return;
+  await fetch('/admin/clear-cache', { method: 'POST' });
+  refreshCache();
+}
+
+async function probe(path) {
+  const out = document.getElementById('probe-out');
+  out.textContent = 'GET ' + path + '\\n...';
+  const t0 = performance.now();
+  try {
+    const r = await fetch(path);
+    const dt = Math.round(performance.now() - t0);
+    const text = await r.text();
+    let pretty;
+    try { pretty = JSON.stringify(JSON.parse(text), null, 2); }
+    catch (e) { pretty = text || '(body vuoto)'; }
+    out.textContent = 'GET ' + path + '\\nHTTP ' + r.status + '  in ' + dt + 'ms\\n\\n' + pretty;
+    refreshCache();
+  } catch (e) {
+    out.textContent = 'errore: ' + e.message;
+  }
+}
+
+refreshStatus();
+refreshCache();
+setInterval(refreshStatus, 10000);
+setInterval(refreshCache, 30000);
+</script>
+</body>
+</html>
+"""
 
 
 def get_app() -> FastAPI:

@@ -103,6 +103,12 @@ class PersistentCache:
     def invalidate(self, key: str) -> None:
         self._data.pop(key, None)
 
+    def clear(self) -> int:
+        """Svuota tutta la cache. Ritorna il numero di entry rimosse."""
+        n = len(self._data)
+        self._data.clear()
+        return n
+
     async def persist_now(self) -> None:
         await self._persist()
 

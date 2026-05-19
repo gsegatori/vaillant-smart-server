@@ -120,3 +120,36 @@ def test_admin_cache_snapshot(client):
     assert "zones" in snap
     assert "fetched_at" in snap["zones"]
     assert "age_seconds" in snap["zones"]
+
+
+def test_index_html(client):
+    r = client.get("/")
+    assert r.status_code == 200
+    body = r.text
+    # contiene i pulsanti chiave
+    assert "/admin/enable" in body
+    assert "/admin/disable" in body
+    assert "/admin/clear-cache" in body
+    # contiene la tabella cache + probe endpoint
+    assert "cache-table" in body
+    assert "/zone-info/0" in body
+    # niente reference esterne a font/cdn
+    assert "https://" not in body.lower() or body.lower().count("https://") < 3
+
+
+def test_admin_clear_cache(client, fake_client):
+    # popola la cache
+    client.get("/zones")
+    client.get("/get-water-pressure")
+    snap = client.get("/admin/cache").json()
+    assert len(snap) >= 2
+    # clear
+    r = client.post("/admin/clear-cache")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["cleared_entries"] >= 2
+    # snapshot vuoto
+    assert client.get("/admin/cache").json() == {}
+    # next call rifa fetch
+    client.get("/zones")
+    assert fake_client.calls["get_zones"] == 2
