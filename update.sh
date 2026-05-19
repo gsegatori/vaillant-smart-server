@@ -13,9 +13,14 @@ set -euo pipefail
 
 echo "== Aggiornamento vaillant-smart-server =="
 
-# --- 1) sync codice ---
+# --- 1) sync codice (auto-stash di eventuali mod locali, es. chmod +x manuale) ---
 if [ -d .git ]; then
   echo "[1/6] git pull..."
+  if ! git diff --quiet HEAD 2>/dev/null; then
+    STASH_MSG="auto-stash-update.sh-$(date +%Y%m%d-%H%M%S)"
+    echo "       mod locali presenti, stash come '$STASH_MSG' (recuperabile con git stash list)"
+    git stash push -q -m "$STASH_MSG"
+  fi
   git pull --ff-only
 else
   echo "[1/6] non sono dentro un repo git, salto pull"
