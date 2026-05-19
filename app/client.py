@@ -175,10 +175,50 @@ class VaillantClient:
                         if data.energy_type != "CONSUMED_PRIMARY_ENERGY":
                             continue
                         op = data.operation_mode
-                        m3 = sum(b.value / 10000 for b in data.data)
+                        m3 = sum((b.value or 0) / 10000 for b in data.data)
                         result["by_mode_m3"][op] = round(m3, 3)
                         result["total_m3"] += m3
                 result["total_m3"] = round(result["total_m3"], 3)
+                return result
+            return result
+
+        return await self._with_retry(_do)
+
+    async def get_gas_consumption_year(self, year: int) -> dict[str, Any]:
+        """Consumo gas dell'intero anno: breakdown per mese + per operation_mode + totale.
+
+        Singola chiamata all'API Vaillant con resolution MONTH e range anno intero
+        (12 bucket) -> economica rispetto a 12 chiamate separate.
+        """
+        start = datetime(year, 1, 1)
+        end = datetime(year, 12, 31, 23, 59, 59)
+
+        async def _do():
+            api = await self._ensure_authenticated()
+            result: dict[str, Any] = {
+                "year": year,
+                "by_month": {},       # {1: {by_mode_m3: {...}, total_m3: N}, ...}
+                "by_mode_m3": {},     # aggregato annuale per modalita'
+                "total_m3": 0.0,
+            }
+            async for system in api.get_systems():
+                for device in system.devices:
+                    if device.device_type != "BOILER":
+                        continue
+                    async for data in api.get_data_by_device(
+                        device, DeviceDataBucketResolution.MONTH, start, end
+                    ):
+                        if data.energy_type != "CONSUMED_PRIMARY_ENERGY":
+                            continue
+                        op = data.operation_mode
+                        for bucket in data.data:
+                            month = bucket.start_date.month
+                            m3 = (bucket.value or 0) / 10000
+                            mo = result["by_month"].setdefault(month, {"by_mode_m3": {}, "total_m3": 0.0})
+                            mo["by_mode_m3"][op] = round(mo["by_mode_m3"].get(op, 0.0) + m3, 3)
+                            mo["total_m3"] = round(mo["total_m3"] + m3, 3)
+                            result["by_mode_m3"][op] = round(result["by_mode_m3"].get(op, 0.0) + m3, 3)
+                            result["total_m3"] = round(result["total_m3"] + m3, 3)
                 return result
             return result
 

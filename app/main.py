@@ -131,6 +131,19 @@ def create_app(
         now = datetime.now()
         return await boiler_consumption(now.year, now.month)
 
+    @app.get("/boiler-consumption-year/{year}")
+    async def boiler_consumption_year(year: int):
+        return await _cached(
+            f"gas_year_{year}",
+            settings.cache_ttl_gas,
+            lambda: client.get_gas_consumption_year(year),
+        )
+
+    @app.get("/boiler-consumption-current-year")
+    async def boiler_consumption_current_year():
+        now = datetime.now()
+        return await boiler_consumption_year(now.year)
+
     @app.get("/zones")
     async def zones_list():
         return await _cached("zones", settings.cache_ttl_zones, client.get_zones)

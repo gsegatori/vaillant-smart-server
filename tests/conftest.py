@@ -62,6 +62,18 @@ class FakeVaillantClient:
             "total_m3": 19.2,
         }
 
+    async def get_gas_consumption_year(self, year: int):
+        self._bump(f"get_gas_consumption_year[{year}]")
+        return {
+            "year": year,
+            "by_month": {
+                1: {"by_mode_m3": {"DOMESTIC_HOT_WATER": 25.0, "HEATING": 100.0}, "total_m3": 125.0},
+                2: {"by_mode_m3": {"DOMESTIC_HOT_WATER": 22.0, "HEATING": 80.0}, "total_m3": 102.0},
+            },
+            "by_mode_m3": {"DOMESTIC_HOT_WATER": 47.0, "HEATING": 180.0},
+            "total_m3": 227.0,
+        }
+
     async def update_zone_mode(self, idx: int, mode: str):
         self._bump(f"update_zone_mode[{idx},{mode}]")
         return {"index": idx, "mode": mode}

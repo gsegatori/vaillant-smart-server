@@ -45,6 +45,35 @@ def test_boiler_consumption_current(client):
     assert "DOMESTIC_HOT_WATER" in body["by_mode_m3"]
 
 
+def test_boiler_consumption_specific_month(client, fake_client):
+    r = client.get("/boiler-consumption/2026/3")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["year"] == 2026
+    assert body["month"] == 3
+    assert fake_client.calls["get_gas_consumption[2026,3]"] == 1
+
+
+def test_boiler_consumption_year(client, fake_client):
+    r = client.get("/boiler-consumption-year/2025")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["year"] == 2025
+    assert body["total_m3"] == 227.0
+    assert "by_month" in body
+    # second call hits cache
+    client.get("/boiler-consumption-year/2025")
+    assert fake_client.calls["get_gas_consumption_year[2025]"] == 1
+
+
+def test_boiler_consumption_current_year(client):
+    r = client.get("/boiler-consumption-current-year")
+    assert r.status_code == 200
+    body = r.json()
+    assert "by_month" in body
+    assert body["total_m3"] == 227.0
+
+
 def test_zone_set_temp_invalidates_cache(client, fake_client):
     # carica zone_info_0 -> cache
     client.get("/zone-info/0")
