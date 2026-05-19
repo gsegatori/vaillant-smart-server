@@ -11,8 +11,20 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from app.cache import PersistentCache
-from app.client import VaillantClient
+from app.client import VaillantClient, VaillantQuotaExceeded
 from app.config import Settings, get_settings
+
+
+def _quota_http_exception(e: VaillantQuotaExceeded) -> HTTPException:
+    return HTTPException(
+        status_code=429,
+        detail={
+            "error": "vaillant_quota_exceeded",
+            "replenish_in": e.replenish_in,
+            "message": f"Quota API Vaillant esaurita, replenish in {e.replenish_in}",
+            "vaillant_message": e.message,
+        },
+    )
 
 log = logging.getLogger("vaillant")
 
@@ -82,7 +94,11 @@ def create_app(
     async def _cached(
         key: str, ttl: int, fetcher: Callable[[], Awaitable[Any]]
     ) -> Any:
-        """Helper: usa cache normalmente; se master e' OFF, serve solo cache (anche scaduta)."""
+        """Helper: usa cache normalmente; se master e' OFF, serve solo cache (anche scaduta).
+
+        Su quota Vaillant: la cache serve stale se ce l'ha (gestita da
+        PersistentCache.get_or_fetch). Solo se cache vuota propaga 429.
+        """
         if not app.state.enabled:
             value = await cache.serve_only(key)
             if value is None:
@@ -91,8 +107,11 @@ def create_app(
                     detail=f"upstream disabled and no cached value for '{key}'",
                 )
             return value
-        value, _stale = await cache.get_or_fetch(key, ttl, fetcher)
-        return value
+        try:
+            value, _stale = await cache.get_or_fetch(key, ttl, fetcher)
+            return value
+        except VaillantQuotaExceeded as e:
+            raise _quota_http_exception(e) from e
 
     # ──────────────────── infra/admin ────────────────────
 
@@ -187,6 +206,8 @@ def create_app(
             raise HTTPException(status_code=503, detail="upstream disabled")
         try:
             result = await client.update_zone_mode(idx, mode)
+        except VaillantQuotaExceeded as e:
+            raise _quota_http_exception(e) from e
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         cache.invalidate(f"zone_info_{idx}")
@@ -196,7 +217,10 @@ def create_app(
     async def zone_set_temp(idx: int, temp: float):
         if not app.state.enabled:
             raise HTTPException(status_code=503, detail="upstream disabled")
-        result = await client.set_zone_setpoint(idx, temp)
+        try:
+            result = await client.set_zone_setpoint(idx, temp)
+        except VaillantQuotaExceeded as e:
+            raise _quota_http_exception(e) from e
         cache.invalidate(f"zone_info_{idx}")
         return result
 
@@ -239,6 +263,10 @@ INDEX_HTML = """<!doctype html>
   .pill.on, .pill.fresh { background: #d4f5d4; color: #060; }
   .pill.off, .pill.expired { background: #fcd; color: #900; }
   .pill.unknown { background: #ddd; color: #555; }
+  .quota-banner { background: #ffe4e4; border: 1px solid #f99; color: #900;
+                  padding: .8em 1em; border-radius: 5px; margin: 1em 0;
+                  display: none; font-weight: 600; }
+  .quota-banner.show { display: block; }
   table { border-collapse: collapse; width: 100%; margin-top: .5em; }
   th, td { padding: .45em .7em; border-bottom: 1px solid #eee; text-align: left; font-size: .9em; }
   th { background: #f5f5f7; font-weight: 600; }
@@ -251,6 +279,11 @@ INDEX_HTML = """<!doctype html>
 <body>
 
 <h1>Vaillant Smart Server <small>v0.2.0</small></h1>
+
+<div id="quota-banner" class="quota-banner">
+  &#9888; Vaillant ha esaurito la quota API. Replenish in <span id="quota-time">--:--:--</span>.
+  Master messo automaticamente OFF dalla UI non e' necessario, ma puoi farlo manualmente per fermare ulteriori tentativi.
+</div>
 
 <div class="panel">
   <h2>Stato</h2>
@@ -337,6 +370,15 @@ async function clearCache() {
   refreshCache();
 }
 
+function showQuotaBanner(replenishIn) {
+  const el = document.getElementById('quota-banner');
+  document.getElementById('quota-time').textContent = replenishIn || '--:--:--';
+  el.classList.add('show');
+}
+function hideQuotaBanner() {
+  document.getElementById('quota-banner').classList.remove('show');
+}
+
 async function probe(path) {
   const out = document.getElementById('probe-out');
   out.textContent = 'GET ' + path + '\\n...';
@@ -348,7 +390,22 @@ async function probe(path) {
     let pretty;
     try { pretty = JSON.stringify(JSON.parse(text), null, 2); }
     catch (e) { pretty = text || '(body vuoto)'; }
-    out.textContent = 'GET ' + path + '\\nHTTP ' + r.status + '  in ' + dt + 'ms\\n\\n' + pretty;
+
+    let header = 'GET ' + path + '\\nHTTP ' + r.status + '  in ' + dt + 'ms';
+    if (r.status === 429) {
+      try {
+        const d = JSON.parse(text);
+        const replenish = d.detail && d.detail.replenish_in;
+        if (replenish) {
+          showQuotaBanner(replenish);
+          header += '\\n\\n\\u26A0 VAILLANT QUOTA ESAURITA. Replenish in ' + replenish;
+        }
+      } catch (e) {}
+    } else if (r.status === 200 && path.startsWith('/zone-info')) {
+      hideQuotaBanner();
+    }
+
+    out.textContent = header + '\\n\\n' + pretty;
     refreshCache();
   } catch (e) {
     out.textContent = 'errore: ' + e.message;

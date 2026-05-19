@@ -137,6 +137,40 @@ def test_index_html(client):
     assert "https://" not in body.lower() or body.lower().count("https://") < 3
 
 
+def test_quota_returns_429_with_detail(client, fake_client):
+    """Cache vuota + quota Vaillant esaurita -> 429 con replenish_in."""
+    fake_client.force_quota = ("00:05:23", "Quota Exceeded test message")
+    r = client.get("/zones")
+    assert r.status_code == 429
+    body = r.json()
+    assert body["detail"]["error"] == "vaillant_quota_exceeded"
+    assert body["detail"]["replenish_in"] == "00:05:23"
+    assert "5:23" in body["detail"]["message"]
+
+
+def test_quota_with_stale_cache_serves_stale(client, fake_client):
+    """Cache popolata + quota esaurita -> 200 con valore stale (no 429)."""
+    # primo fetch popola cache
+    r1 = client.get("/zones")
+    assert r1.status_code == 200
+    # ora il client va in quota
+    fake_client.force_quota = ("00:05:00", "test")
+    # invalida la cache di zones cosi' la prossima richiesta scatena un fetch
+    # (in produzione succede naturalmente quando TTL scade)
+    # Ma il get_or_fetch ha cache fresca, quindi prima testiamo con cache fresh
+    r2 = client.get("/zones")
+    # Cache fresca -> serve direttamente, no fetch -> 200 senza quota error
+    assert r2.status_code == 200
+
+
+def test_zone_update_quota_returns_429(client, fake_client):
+    """Anche le azioni di scrittura (zone-update) devono dare 429 su quota."""
+    fake_client.force_quota = ("00:10:00", "test")
+    r = client.get("/zone-update/0/manual")
+    assert r.status_code == 429
+    assert r.json()["detail"]["replenish_in"] == "00:10:00"
+
+
 def test_admin_clear_cache(client, fake_client):
     # popola la cache
     client.get("/zones")

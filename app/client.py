@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -19,6 +20,22 @@ from myPyllant.api import MyPyllantAPI
 from myPyllant.enums import DeviceDataBucketResolution, ZoneOperatingMode
 
 log = logging.getLogger(__name__)
+
+_QUOTA_REPLENISH_RE = re.compile(r"Quota will be replenished in (\d+:\d+:\d+)")
+
+
+class VaillantQuotaExceeded(Exception):
+    """L'API Vaillant ha respinto la richiesta per quota esaurita.
+
+    Carries replenish_in (formato HH:MM:SS) e il messaggio originale dell'API
+    per surface up agli endpoint, che lo convertono in HTTP 429 con detail
+    strutturato per la UI.
+    """
+
+    def __init__(self, replenish_in: str, message: str = "") -> None:
+        self.replenish_in = replenish_in
+        self.message = message
+        super().__init__(f"Vaillant quota exceeded, replenish in {replenish_in}")
 
 
 class VaillantClient:
@@ -88,6 +105,27 @@ class VaillantClient:
         for attempt in range(1, self._retries + 1):
             try:
                 return await coro_factory()
+            except aiohttp.ClientResponseError as e:
+                # 403 con messaggio "Quota Exceeded": niente retry, surface up
+                # subito - il retry non sblocca prima del replenish.
+                if e.status == 403 and (
+                    "Quota Exceeded" in str(e) or "Out of call volume" in str(e)
+                ):
+                    match = _QUOTA_REPLENISH_RE.search(str(e))
+                    replenish = match.group(1) if match else "<unknown>"
+                    log.warning("Vaillant quota exhausted, replenish in %s", replenish)
+                    raise VaillantQuotaExceeded(replenish, str(e)[:200]) from e
+                # altri 4xx/5xx: tratta come transient -> retry
+                last_exc = e
+                if attempt < self._retries:
+                    wait = self._backoff ** (attempt - 1)
+                    log.warning(
+                        "Vaillant call failed (attempt %d/%d): %s; retry in %.1fs",
+                        attempt, self._retries, e, wait,
+                    )
+                    await asyncio.sleep(wait)
+                else:
+                    log.error("Vaillant call failed permanently after %d attempts: %s", self._retries, e)
             except (aiohttp.ClientError, asyncio.TimeoutError, ConnectionError) as e:
                 last_exc = e
                 if attempt < self._retries:

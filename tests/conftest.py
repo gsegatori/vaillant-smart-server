@@ -14,11 +14,16 @@ class FakeVaillantClient:
     def __init__(self, *args, **kwargs):
         self.calls: dict[str, int] = {}
         self.fail_on: set[str] = set()
+        self.force_quota: tuple[str, str] | None = None  # (replenish_in, message)
 
     def _bump(self, name: str):
         self.calls[name] = self.calls.get(name, 0) + 1
         if name in self.fail_on:
             raise RuntimeError(f"forced failure in {name}")
+        if self.force_quota is not None:
+            from app.client import VaillantQuotaExceeded
+            rep, msg = self.force_quota
+            raise VaillantQuotaExceeded(rep, msg)
 
     async def close(self):
         pass
