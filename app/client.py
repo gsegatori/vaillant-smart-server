@@ -11,6 +11,7 @@ import asyncio
 import json
 import logging
 import re
+import time
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -49,6 +50,7 @@ class VaillantClient:
         country: str,
         retries: int = 3,
         backoff_base_s: float = 2.0,
+        system_cache_ttl_s: float = 60.0,
     ) -> None:
         self._user = user
         self._password = password
@@ -58,6 +60,13 @@ class VaillantClient:
         self._backoff = backoff_base_s
         self._api: MyPyllantAPI | None = None
         self._login_lock = asyncio.Lock()
+
+        # Cache in-memory del System: TUTTI i read endpoint riusano lo
+        # stesso fetch entro questo TTL. Le write invalidano dopo PATCH.
+        self._system_cache_ttl: float = system_cache_ttl_s
+        self._system_cache: Any | None = None
+        self._system_cache_at: float = 0.0
+        self._system_lock = asyncio.Lock()  # single-flight su get_systems()
 
     async def close(self) -> None:
         if self._api is not None and self._api.aiohttp_session is not None:
@@ -140,27 +149,55 @@ class VaillantClient:
         assert last_exc is not None
         raise last_exc
 
+    async def _get_cached_system(self, *, force_refresh: bool = False) -> Any:
+        """Ritorna il System Vaillant cachato in memoria (o lo fetcha se necessario).
+
+        Singolo flight tramite lock: chiamate concorrenti aspettano la prima.
+        TTL configurato da settings.system_cache_ttl_s.
+        """
+        async with self._system_lock:
+            now = time.time()
+            if (
+                not force_refresh
+                and self._system_cache is not None
+                and (now - self._system_cache_at) < self._system_cache_ttl
+            ):
+                return self._system_cache
+            api = await self._ensure_authenticated()
+            async for system in api.get_systems():
+                self._system_cache = system
+                self._system_cache_at = now
+                return system
+            raise RuntimeError("nessun system Vaillant trovato per questo account")
+
+    def invalidate_system_cache(self) -> None:
+        """Forza il prossimo _get_cached_system() a rifare fetch.
+
+        Da chiamare dopo una write (PATCH) cosi' il prossimo read vede lo
+        stato aggiornato senza dover aspettare il TTL.
+        """
+        self._system_cache = None
+        self._system_cache_at = 0.0
+
+    # Mantieni _first_system come alias per backward-compat dei test
     async def _first_system(self):
-        api = await self._ensure_authenticated()
-        async for system in api.get_systems():
-            return system
-        raise RuntimeError("nessun system Vaillant trovato per questo account")
+        return await self._get_cached_system()
 
     async def get_water_pressure(self) -> float | None:
         async def _do():
-            system = await self._first_system()
+            system = await self._get_cached_system()
             return getattr(system, "water_pressure", None)
         return await self._with_retry(_do)
 
     async def get_zones(self) -> list[dict[str, Any]]:
         async def _do():
-            system = await self._first_system()
+            system = await self._get_cached_system()
             return [{"index": i, "name": z.name} for i, z in enumerate(system.zones)]
         return await self._with_retry(_do)
 
     async def get_zone_info(self, idx: int) -> dict[str, Any] | None:
         async def _do():
-            system = await self._first_system()
+            system = await self._get_cached_system()
             if not (0 <= idx < len(system.zones)):
                 return None
             z = system.zones[idx]
@@ -175,7 +212,7 @@ class VaillantClient:
 
     async def get_zone_flow_temperature(self, idx: int) -> float | None:
         async def _do():
-            system = await self._first_system()
+            system = await self._get_cached_system()
             if not (0 <= idx < len(system.zones)):
                 return None
             z = system.zones[idx]
@@ -197,27 +234,26 @@ class VaillantClient:
 
         async def _do():
             api = await self._ensure_authenticated()
+            system = await self._get_cached_system()
             result: dict[str, Any] = {
                 "year": year,
                 "month": month,
                 "by_mode_m3": {},
                 "total_m3": 0.0,
             }
-            async for system in api.get_systems():
-                for device in system.devices:
-                    if device.device_type != "BOILER":
+            for device in system.devices:
+                if device.device_type != "BOILER":
+                    continue
+                async for data in api.get_data_by_device(
+                    device, DeviceDataBucketResolution.MONTH, start, end
+                ):
+                    if data.energy_type != "CONSUMED_PRIMARY_ENERGY":
                         continue
-                    async for data in api.get_data_by_device(
-                        device, DeviceDataBucketResolution.MONTH, start, end
-                    ):
-                        if data.energy_type != "CONSUMED_PRIMARY_ENERGY":
-                            continue
-                        op = data.operation_mode
-                        m3 = sum((b.value or 0) / 10000 for b in data.data)
-                        result["by_mode_m3"][op] = round(m3, 3)
-                        result["total_m3"] += m3
-                result["total_m3"] = round(result["total_m3"], 3)
-                return result
+                    op = data.operation_mode
+                    m3 = sum((b.value or 0) / 10000 for b in data.data)
+                    result["by_mode_m3"][op] = round(m3, 3)
+                    result["total_m3"] += m3
+            result["total_m3"] = round(result["total_m3"], 3)
             return result
 
         return await self._with_retry(_do)
@@ -233,31 +269,30 @@ class VaillantClient:
 
         async def _do():
             api = await self._ensure_authenticated()
+            system = await self._get_cached_system()
             result: dict[str, Any] = {
                 "year": year,
                 "by_month": {},       # {1: {by_mode_m3: {...}, total_m3: N}, ...}
                 "by_mode_m3": {},     # aggregato annuale per modalita'
                 "total_m3": 0.0,
             }
-            async for system in api.get_systems():
-                for device in system.devices:
-                    if device.device_type != "BOILER":
+            for device in system.devices:
+                if device.device_type != "BOILER":
+                    continue
+                async for data in api.get_data_by_device(
+                    device, DeviceDataBucketResolution.MONTH, start, end
+                ):
+                    if data.energy_type != "CONSUMED_PRIMARY_ENERGY":
                         continue
-                    async for data in api.get_data_by_device(
-                        device, DeviceDataBucketResolution.MONTH, start, end
-                    ):
-                        if data.energy_type != "CONSUMED_PRIMARY_ENERGY":
-                            continue
-                        op = data.operation_mode
-                        for bucket in data.data:
-                            month = bucket.start_date.month
-                            m3 = (bucket.value or 0) / 10000
-                            mo = result["by_month"].setdefault(month, {"by_mode_m3": {}, "total_m3": 0.0})
-                            mo["by_mode_m3"][op] = round(mo["by_mode_m3"].get(op, 0.0) + m3, 3)
-                            mo["total_m3"] = round(mo["total_m3"] + m3, 3)
-                            result["by_mode_m3"][op] = round(result["by_mode_m3"].get(op, 0.0) + m3, 3)
-                            result["total_m3"] = round(result["total_m3"] + m3, 3)
-                return result
+                    op = data.operation_mode
+                    for bucket in data.data:
+                        month = bucket.start_date.month
+                        m3 = (bucket.value or 0) / 10000
+                        mo = result["by_month"].setdefault(month, {"by_mode_m3": {}, "total_m3": 0.0})
+                        mo["by_mode_m3"][op] = round(mo["by_mode_m3"].get(op, 0.0) + m3, 3)
+                        mo["total_m3"] = round(mo["total_m3"] + m3, 3)
+                        result["by_mode_m3"][op] = round(result["by_mode_m3"].get(op, 0.0) + m3, 3)
+                        result["total_m3"] = round(result["total_m3"] + m3, 3)
             return result
 
         return await self._with_retry(_do)
@@ -273,39 +308,41 @@ class VaillantClient:
             raise ValueError(f"mode invalido: {mode}")
 
         async def _do():
+            # Riusa cache del system: niente get_systems() extra ad ogni write.
+            system = await self._get_cached_system()
+            if not (0 <= idx < len(system.zones)):
+                return {"error": "zone not found"}
+            z = system.zones[idx]
             api = await self._ensure_authenticated()
-            async for system in api.get_systems():
-                if not (0 <= idx < len(system.zones)):
-                    return {"error": "zone not found"}
-                z = system.zones[idx]
-                url = f"{await api.get_system_api_base(z.system_id)}/zones/{z.index}/heating-operation-mode"
-                async with api.aiohttp_session.patch(
-                    url,
-                    json={"operationMode": new_mode.name},
-                    headers=api.get_authorized_headers(),
-                ) as resp:
-                    resp.raise_for_status()
-                return {"index": idx, "name": z.name, "mode": new_mode.name}
-            return {"error": "no system"}
+            url = f"{await api.get_system_api_base(z.system_id)}/zones/{z.index}/heating-operation-mode"
+            async with api.aiohttp_session.patch(
+                url,
+                json={"operationMode": new_mode.name},
+                headers=api.get_authorized_headers(),
+            ) as resp:
+                resp.raise_for_status()
+            # Invalida cache: prossimo read vede lo stato nuovo.
+            self.invalidate_system_cache()
+            return {"index": idx, "name": z.name, "mode": new_mode.name}
 
         return await self._with_retry(_do)
 
     async def set_zone_setpoint(self, idx: int, temperature: float) -> dict[str, Any]:
         async def _do():
+            system = await self._get_cached_system()
+            if not (0 <= idx < len(system.zones)):
+                return {"error": "zone not found"}
+            z = system.zones[idx]
             api = await self._ensure_authenticated()
-            async for system in api.get_systems():
-                if not (0 <= idx < len(system.zones)):
-                    return {"error": "zone not found"}
-                z = system.zones[idx]
-                await api.set_manual_mode_setpoint(z, temperature, "heating")
-                return {"index": idx, "name": z.name, "setpoint": temperature}
-            return {"error": "no system"}
+            await api.set_manual_mode_setpoint(z, temperature, "heating")
+            self.invalidate_system_cache()
+            return {"index": idx, "name": z.name, "setpoint": temperature}
 
         return await self._with_retry(_do)
 
     async def get_system_info(self) -> dict[str, Any]:
         async def _do():
-            system = await self._first_system()
+            system = await self._get_cached_system()
             return _serialize(system)
 
         return await self._with_retry(_do)

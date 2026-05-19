@@ -43,6 +43,12 @@ class Settings(BaseSettings):
     retries: int = 3
     retry_backoff_base_s: float = 2.0
 
+    # Cache in-memory del System object Vaillant lato client. Tutti i read
+    # endpoint (zone-info, water-pressure, zones, system-info, gas) riusano
+    # lo stesso fetch entro questo TTL. Le write invalidano dopo PATCH
+    # cosi' il prossimo read riprende fresco. Drastica riduzione chiamate /homes.
+    system_cache_ttl_s: float = 60.0
+
     log_level: str = "INFO"
 
 

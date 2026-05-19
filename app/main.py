@@ -62,6 +62,7 @@ def create_app(
         settings.vaillant_country,
         retries=settings.retries,
         backoff_base_s=settings.retry_backoff_base_s,
+        system_cache_ttl_s=settings.system_cache_ttl_s,
     )
 
     @asynccontextmanager
