@@ -296,7 +296,13 @@ def create_app(
             raise _quota_http_exception(e) from e
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
-        cache.invalidate(f"zone_info_{idx}")
+        # Optimistic update: la PATCH e' confermata, sappiamo per certo il
+        # nuovo mode -> aggiorno la cache zone_info cosi' il prossimo poll di
+        # OH lo vede subito (cache hit, niente chiamata Vaillant).
+        new_mode = result.get("mode")
+        if new_mode and not cache.patch_value(f"zone_info_{idx}", heating_state=new_mode):
+            cache.invalidate(f"zone_info_{idx}")  # entry non c'era: refetch al prossimo accesso
+        await cache.persist_now()
         return result
 
     @app.get("/zone-set-temp/{idx}/{temp}")
@@ -307,7 +313,10 @@ def create_app(
             result = await client.set_zone_setpoint(idx, temp)
         except VaillantQuotaExceeded as e:
             raise _quota_http_exception(e) from e
-        cache.invalidate(f"zone_info_{idx}")
+        # Optimistic update del setpoint nella cache zone_info.
+        if not cache.patch_value(f"zone_info_{idx}", desired_temperature=temp):
+            cache.invalidate(f"zone_info_{idx}")
+        await cache.persist_now()
         return result
 
     @app.get("/get-water-pressure")

@@ -103,6 +103,23 @@ class PersistentCache:
     def invalidate(self, key: str) -> None:
         self._data.pop(key, None)
 
+    def patch_value(self, key: str, **fields: Any) -> bool:
+        """Aggiorna in-place alcuni campi di un valore dict gia' cachato.
+
+        Mantiene fetched_at e ttl_seconds invariati: l'entry resta valida fino
+        alla sua scadenza naturale, dopodiche' viene rifetchata e riconciliata.
+        Usato per l'optimistic update dopo una write confermata (es. cambio
+        mode): cosi' OH vede subito lo stato nuovo senza una chiamata extra a
+        Vaillant, e anche su quota la serve-stale ritorna il valore corretto.
+
+        Ritorna True se l'entry esisteva ed e' un dict, False altrimenti.
+        """
+        entry = self._data.get(key)
+        if entry is None or not isinstance(entry.value, dict):
+            return False
+        entry.value = {**entry.value, **fields}
+        return True
+
     def clear(self) -> int:
         """Svuota tutta la cache. Ritorna il numero di entry rimosse."""
         n = len(self._data)

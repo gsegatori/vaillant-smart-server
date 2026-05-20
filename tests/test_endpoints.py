@@ -74,16 +74,31 @@ def test_boiler_consumption_current_year(client):
     assert body["total_m3"] == 227.0
 
 
-def test_zone_set_temp_invalidates_cache(client, fake_client):
-    # carica zone_info_0 -> cache
-    client.get("/zone-info/0")
+def test_zone_set_temp_optimistic_cache(client, fake_client):
+    # carica zone_info_0 -> cache (FakeClient ritorna desired_temperature=5.0)
+    z1 = client.get("/zone-info/0").json()
+    assert z1["desired_temperature"] == 5.0
     assert fake_client.calls["get_zone_info[0]"] == 1
-    # set temp -> invalida cache
+    # set temp -> optimistic update della cache, NO refetch
     r = client.get("/zone-set-temp/0/22.5")
     assert r.status_code == 200
-    # next zone_info_0 deve rifare la fetch
-    client.get("/zone-info/0")
-    assert fake_client.calls["get_zone_info[0]"] == 2
+    # next zone_info_0 deve venire dalla cache aggiornata, senza nuova fetch
+    z2 = client.get("/zone-info/0").json()
+    assert z2["desired_temperature"] == 22.5  # valore optimistic
+    assert fake_client.calls["get_zone_info[0]"] == 1  # nessuna fetch extra
+
+
+def test_zone_update_optimistic_cache(client, fake_client):
+    # carica zone_info_0 -> cache (FakeClient ritorna heating_state="OFF")
+    z1 = client.get("/zone-info/0").json()
+    assert z1["heating_state"] == "OFF"
+    # cambia mode a manual -> optimistic update
+    r = client.get("/zone-update/0/manual")
+    assert r.status_code == 200
+    # next zone_info_0 deve mostrare heating_state aggiornato, senza refetch
+    z2 = client.get("/zone-info/0").json()
+    assert z2["heating_state"] == "manual"  # FakeClient.update_zone_mode ritorna mode=il valore passato
+    assert fake_client.calls["get_zone_info[0]"] == 1  # nessuna fetch extra
 
 
 def test_disable_blocks_upstream_and_serves_cache(client, fake_client):
