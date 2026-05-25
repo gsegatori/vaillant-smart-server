@@ -199,6 +199,19 @@ def create_app(
     async def admin_cache():
         return cache.snapshot()
 
+    @app.get("/admin/cache/summary")
+    async def admin_cache_summary():
+        """Versione compatta dello snapshot, senza i payload value."""
+        snap = cache.snapshot()
+        return {
+            k: {
+                "age_seconds": v["age_seconds"],
+                "ttl_seconds": v["ttl_seconds"],
+                "expired": v["expired"],
+            }
+            for k, v in snap.items()
+        }
+
     @app.post("/admin/enable")
     async def admin_enable():
         app.state.enabled = True
