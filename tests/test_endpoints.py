@@ -164,15 +164,19 @@ def test_quota_returns_429_with_detail(client, fake_client):
 
 
 def test_quota_triggers_auto_lockout(client, fake_client):
-    """Quota exception -> master messo automaticamente a OFF + quota_resume_at settato."""
+    """Quota exception -> master messo automaticamente a OFF + quota_resume_at settato.
+
+    Il resume_at e' replenish_in + QUOTA_RESUME_BUFFER_S (3 min) per evitare
+    ri-ban immediato al primo poll dopo la finestra.
+    """
     fake_client.force_quota = ("00:10:00", "test")
     r = client.get("/zones")
     assert r.status_code == 429
-    # ora healthz deve mostrare enabled=False + quota_resume_in_seconds ~600
+    # 10 min (600s) + 3 min (180s) buffer = ~780s
     h = client.get("/healthz").json()
     assert h["enabled"] is False
     assert "quota_resume_in_seconds" in h
-    assert 595 <= h["quota_resume_in_seconds"] <= 600
+    assert 775 <= h["quota_resume_in_seconds"] <= 780
 
 
 def test_admin_enable_cancels_quota_timer(client, fake_client):
