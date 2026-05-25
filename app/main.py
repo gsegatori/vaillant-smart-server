@@ -112,18 +112,24 @@ def create_app(
     # quell'orario. Anche /admin/disable e /admin/enable lo cancellano.
     app.state.quota_resume_at = None  # datetime | None
 
+    # Buffer aggiunto al replenish_in dichiarato da Vaillant: il countdown
+    # restituito dall'API e' indicativo, non garantito al secondo. Senza
+    # buffer rischiamo di auto-riabilitare proprio mentre Vaillant e' ancora
+    # in soglia, e il primo poll del binding HTTP ci ribanna subito.
+    QUOTA_RESUME_BUFFER_S = 180  # 3 minuti
+
     def _trigger_quota_lockout(e: VaillantQuotaExceeded) -> None:
         secs = _parse_replenish_to_seconds(e.replenish_in)
         if secs <= 0:
             log.warning("Quota lockout senza replenish_in parsabile (%s); upstream lasciato com'e'", e.replenish_in)
             return
-        resume_at = datetime.now(timezone.utc) + timedelta(seconds=secs)
+        resume_at = datetime.now(timezone.utc) + timedelta(seconds=secs + QUOTA_RESUME_BUFFER_S)
         was_enabled = app.state.enabled
         app.state.enabled = False
         app.state.quota_resume_at = resume_at
         log.warning(
-            "Auto-DISABLE upstream per quota Vaillant (replenish in %s); riprendo alle %s UTC%s",
-            e.replenish_in, resume_at.strftime("%H:%M:%S"),
+            "Auto-DISABLE upstream per quota Vaillant (Vaillant dice %s, riprendo alle %s UTC con +%ds buffer)%s",
+            e.replenish_in, resume_at.strftime("%H:%M:%S"), QUOTA_RESUME_BUFFER_S,
             "" if was_enabled else " (era gia' OFF)",
         )
 
