@@ -87,6 +87,12 @@ class FakeVaillantClient:
         self._bump(f"set_zone_setpoint[{idx},{temperature}]")
         return {"index": idx, "setpoint": temperature}
 
+    async def update_dhw_temperature(self, idx: int, temperature: float):
+        self._bump(f"update_dhw_temperature[{idx},{temperature}]")
+        if idx != 0:
+            return {"error": "DHW system not found"}
+        return {"index": idx, "temperature": temperature, "message": f"DHW Temperature set to {temperature}°C"}
+
     async def get_system_info(self):
         self._bump("get_system_info")
         return {"home": "fake", "zones": 3}

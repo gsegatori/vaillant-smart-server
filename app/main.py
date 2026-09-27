@@ -338,6 +338,23 @@ def create_app(
         await cache.persist_now()
         return result
 
+    @app.get("/dhw-set-temp/{idx}/{temp}")
+    async def dhw_set_temp(idx: int, temp: float):
+        if not app.state.enabled:
+            raise HTTPException(status_code=503, detail="upstream disabled")
+        try:
+            result = await client.update_dhw_temperature(idx, temp)
+        except VaillantQuotaExceeded as e:
+            raise _quota_http_exception(e) from e
+        if "error" in result:
+            raise HTTPException(status_code=404, detail=result["error"])
+        # Optimistic update of DHW setpoint in cache, or invalidate if not cached.
+        if not cache.patch_value(f"dhw_info_{idx}", desired_temperature=temp, temperature=temp):
+            cache.invalidate(f"dhw_info_{idx}")
+        cache.invalidate("system_info")
+        await cache.persist_now()
+        return result
+
     @app.get("/get-water-pressure")
     async def get_water_pressure():
         value = await _cached("water_pressure", settings.cache_ttl_water_pressure, client.get_water_pressure)
@@ -422,6 +439,15 @@ INDEX_HTML = """<!doctype html>
 </div>
 
 <div class="panel">
+  <h2>Domestic Hot Water (DHW)</h2>
+  <p>
+    Set temperature:
+    <input type="number" id="dhw-temp-input" value="50" min="35" max="65" step="1" style="width: 4.5em; padding: .35em; border: 1px solid #ccc; border-radius: 4px;">&deg;C
+    <button onclick="setDhwTemp(0)">Set DHW</button>
+  </p>
+</div>
+
+<div class="panel">
   <h2>Zone</h2>
   <button onclick="refreshZones()">&#8635; Ricarica</button>
   <div id="zones-list"><em>caricamento...</em></div>
@@ -445,6 +471,7 @@ INDEX_HTML = """<!doctype html>
     <button onclick="probe('/zone-info/0')">/zone-info/0</button>
     <button onclick="probe('/zone-info/1')">/zone-info/1</button>
     <button onclick="probe('/zone-info/2')">/zone-info/2</button>
+    <button onclick="probe('/dhw-set-temp/0/55')">/dhw-set-temp/0/55</button>
     <button onclick="probe('/get-water-pressure')">/get-water-pressure</button>
     <button onclick="probe('/boiler-consumption-current-month')">/boiler-consumption-current-month</button>
     <button onclick="probe('/boiler-consumption-current-year')">/boiler-consumption-current-year</button>
@@ -620,6 +647,22 @@ async function setZoneSetpoint(idx) {
     return;
   }
   setTimeout(refreshZones, 500);
+  setTimeout(refreshCache, 800);
+}
+
+async function setDhwTemp(idx) {
+  const val = document.getElementById('dhw-temp-input').value;
+  if (!val || isNaN(parseFloat(val))) {
+    alert('Invalid temperature: ' + val);
+    return;
+  }
+  const r = await fetch('/dhw-set-temp/' + idx + '/' + val);
+  const res = await handleResponse(r);
+  if (!res.ok) {
+    alert('Error ' + res.status + ': ' + JSON.stringify(res.body));
+    return;
+  }
+  alert('DHW temperature set to ' + val + '°C');
   setTimeout(refreshCache, 800);
 }
 

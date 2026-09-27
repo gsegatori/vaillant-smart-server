@@ -340,6 +340,19 @@ class VaillantClient:
 
         return await self._with_retry(_do)
 
+    async def update_dhw_temperature(self, idx: int, temperature: float) -> dict[str, Any]:
+        async def _do():
+            system = await self._get_cached_system()
+            if not getattr(system, "domestic_hot_water", None) or not (0 <= idx < len(system.domestic_hot_water)):
+                return {"error": "DHW system not found"}
+            dhw = system.domestic_hot_water[idx]
+            api = await self._ensure_authenticated()
+            await api.set_domestic_hot_water_temperature(dhw, temperature=int(temperature))
+            self.invalidate_system_cache()
+            return {"index": idx, "temperature": temperature, "message": f"DHW Temperature set to {temperature}°C"}
+
+        return await self._with_retry(_do)
+
     async def get_system_info(self) -> dict[str, Any]:
         async def _do():
             system = await self._get_cached_system()

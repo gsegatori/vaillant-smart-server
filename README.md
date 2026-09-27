@@ -24,6 +24,7 @@ Caratteristiche chiave per **non farsi rate-limitare da Vaillant**:
 | GET | `/zone-flow-temp/{idx}` | 5min | temperatura mandata del circuito |
 | GET | `/zone-update/{idx}/{mode}` | — | imposta `manual`/`off`/`time_controlled`, invalida cache |
 | GET | `/zone-set-temp/{idx}/{temp}` | — | imposta setpoint, invalida cache |
+| GET | `/dhw-set-temp/{idx}/{temp}` | — | set DHW (Domestic Hot Water) temperature, updates/invalidates cache |
 | GET | `/get-water-pressure` | 10min | pressione bar |
 | GET | `/get-system-info` | 5min | dump intero system serializzato |
 
