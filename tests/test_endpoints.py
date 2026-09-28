@@ -244,3 +244,31 @@ def test_admin_clear_cache(client, fake_client):
     # next call rifa fetch
     client.get("/zones")
     assert fake_client.calls["get_zones"] == 2
+
+
+def test_dhw_set_temp(client, fake_client):
+    # populate system_info cache
+    client.get("/get-system-info")
+    assert fake_client.calls.get("get_system_info") == 1
+
+    r = client.get("/dhw-set-temp/0/55")
+    assert r.status_code == 200
+    assert r.json()["temperature"] == 55
+    assert fake_client.calls.get("update_dhw_temperature[0,55.0]") == 1
+
+    # system_info was invalidated by dhw_set_temp, next call re-fetches
+    client.get("/get-system-info")
+    assert fake_client.calls.get("get_system_info") == 2
+
+
+def test_dhw_set_temp_not_found(client, fake_client):
+    r = client.get("/dhw-set-temp/99/55")
+    assert r.status_code == 404
+
+
+def test_dhw_set_temp_quota_returns_429(client, fake_client):
+    fake_client.force_quota = ("00:15:00", "test")
+    r = client.get("/dhw-set-temp/0/55")
+    assert r.status_code == 429
+    assert r.json()["detail"]["replenish_in"] == "00:15:00"
+
