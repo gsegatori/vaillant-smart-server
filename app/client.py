@@ -12,7 +12,7 @@ import json
 import logging
 import re
 import time
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, tzinfo
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -370,9 +370,16 @@ class VaillantClient:
                 if isinstance(rts, dict)
                 else getattr(rts, "statistics", {})
             )
+            sys_tz = getattr(system, "timezone", None)
+            if isinstance(sys_tz, str):
+                try:
+                    sys_tz = ZoneInfo(sys_tz)
+                except Exception:
+                    sys_tz = None
+            tz = sys_tz if isinstance(sys_tz, tzinfo) else None
             result_dict = {
                 "rts_statistics": stats,
-                "update_timestamp": str(datetime.now()),
+                "update_timestamp": datetime.now(tz),
             }
             return _serialize(result_dict)
 

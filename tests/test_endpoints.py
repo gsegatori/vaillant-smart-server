@@ -282,3 +282,21 @@ def test_get_rts(client, fake_client):
     assert fake_client.calls["get_rts"] == 1
 
 
+async def test_vaillant_client_get_rts_uses_system_timezone():
+    from datetime import datetime
+    from unittest.mock import AsyncMock, MagicMock
+    from zoneinfo import ZoneInfo
+    from app.client import VaillantClient
+
+    c = VaillantClient(user="u", password="p", brand="vaillant", country="italy")
+    mock_system = MagicMock()
+    mock_system.timezone = ZoneInfo("Europe/Rome")
+    mock_api = MagicMock()
+    mock_api.get_rts = AsyncMock(return_value={"statistics": {"flow_temp": 30.0}})
+    c._ensure_authenticated = AsyncMock(return_value=mock_api)
+    c._get_cached_system = AsyncMock(return_value=mock_system)
+
+    res = await c.get_rts()
+    assert res["rts_statistics"] == {"flow_temp": 30.0}
+    dt = datetime.fromisoformat(res["update_timestamp"])
+    assert dt.tzinfo is not None
