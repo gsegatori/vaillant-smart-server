@@ -272,3 +272,13 @@ def test_dhw_set_temp_quota_returns_429(client, fake_client):
     assert r.status_code == 429
     assert r.json()["detail"]["replenish_in"] == "00:15:00"
 
+
+def test_get_rts(client, fake_client):
+    r = client.get("/get-rts")
+    assert r.status_code == 200
+    body = r.json()
+    assert "rts_statistics" in body
+    assert body["rts_statistics"]["flow_temp"] == 32.5
+    assert fake_client.calls["get_rts"] == 1
+
+

@@ -360,6 +360,24 @@ class VaillantClient:
 
         return await self._with_retry(_do)
 
+    async def get_rts(self) -> dict[str, Any]:
+        async def _do():
+            api = await self._ensure_authenticated()
+            system = await self._get_cached_system()
+            rts = await api.get_rts(system)
+            stats = (
+                rts.get("statistics")
+                if isinstance(rts, dict)
+                else getattr(rts, "statistics", {})
+            )
+            result_dict = {
+                "rts_statistics": stats,
+                "update_timestamp": str(datetime.now()),
+            }
+            return _serialize(result_dict)
+
+        return await self._with_retry(_do)
+
 
 def _serialize(obj: Any) -> Any:
     """Serializer "best effort" verso JSON-safe primitives."""
