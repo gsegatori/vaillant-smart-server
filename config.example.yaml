@@ -1,0 +1,93 @@
+# ==============================================================================
+# Vaillant Smart Server - Configuration Example (config.example.yaml)
+#
+# Copy this file to 'config.yaml' in the working directory or specify its path
+# via the VAILLANT_CONFIG_FILE environment variable.
+#
+# Configuration settings can be spread across environment variables (.env file)
+# and this file. If a configuration key is defined in both, the .env file
+# (and environment variables) takes priority over this file.
+# ==============================================================================
+
+# --- Network ---
+bind_host: "0.0.0.0"
+bind_port: 5000
+
+# --- Vaillant account (myPyllant) ---
+vaillant_user: "your-email@example.com"
+vaillant_password: "secretpassword"
+vaillant_brand: "vaillant"
+vaillant_country: "italy"
+
+# --- Persistent cache (path in container or on filesystem) ---
+cache_file: "/data/cache.json"
+
+# --- TTL in seconds for each data type ---
+cache_ttl_system_info: 300
+cache_ttl_zone_info: 300
+cache_ttl_zone_flow: 300
+cache_ttl_zones: 1800
+cache_ttl_water_pressure: 600
+cache_ttl_gas: 14400
+cache_ttl_rts: 600
+
+# --- Retries and in-memory cache ---
+retries: 3
+retry_backoff_base_s: 2.0
+system_cache_ttl_s: 60.0
+
+# --- Logging ---
+log_level: "INFO"
+
+# --- Heating Schedule Presets ---
+# Configure daily heating time windows (start_time and end_time in minutes from midnight, 0..1440)
+# and desired domestic hot water mode (TIME_CONTROLLED, OFF, MANUAL).
+presets:
+  AT_HOME:
+    name: "At Home"
+    dhw_mode: "TIME_CONTROLLED"
+    heating_plan:
+      - start_time: 0
+        end_time: 180
+        setpoint: 19.5
+      - start_time: 180
+        end_time: 1260
+        setpoint: 20.5
+      - start_time: 1260
+        end_time: 1320
+        setpoint: 19.5
+      - start_time: 1320
+        end_time: 1385
+        setpoint: 15.0
+      - start_time: 1385
+        end_time: 1440
+        setpoint: 19.5
+
+  HOLIDAY:
+    name: "Holiday"
+    dhw_mode: "OFF"
+    heating_plan:
+      - start_time: 0
+        end_time: 355
+        setpoint: 17.0
+      - start_time: 355
+        end_time: 1385
+        setpoint: 15.0
+      - start_time: 1385
+        end_time: 1440
+        setpoint: 17.0
+
+  # To be set one day before coming back, to warm the house mostly during cheaper electricity hours overnight.
+  COMING_BACK:
+    name: "Coming Back"
+    dhw_mode: "TIME_CONTROLLED"
+    heating_plan:
+      - start_time: 0
+        end_time: 355
+        setpoint: 20.5
+      - start_time: 355
+        end_time: 1385
+        setpoint: 17.0
+      - start_time: 1385
+        end_time: 1440
+        setpoint: 20.5

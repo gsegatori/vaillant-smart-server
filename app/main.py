@@ -64,6 +64,7 @@ def create_app(
         retries=settings.retries,
         backoff_base_s=settings.retry_backoff_base_s,
         system_cache_ttl_s=settings.system_cache_ttl_s,
+        presets=settings.presets,
     )
 
     async def _quota_resume_loop() -> None:
@@ -355,6 +356,22 @@ def create_app(
         await cache.persist_now()
         return result
 
+    @app.get("/apply-preset/{preset}")
+    async def apply_preset(preset: str):
+        if not app.state.enabled:
+            raise HTTPException(status_code=503, detail="upstream disabled")
+        preset_upper = preset.upper()
+        available_presets = getattr(client, "presets", settings.presets)
+        if preset_upper not in available_presets:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid mode '{preset}'. Valid modes: {list(available_presets.keys())}",
+            )
+        try:
+            return await client.apply_preset(preset_upper)
+        except VaillantQuotaExceeded as e:
+            raise _quota_http_exception(e) from e
+
     @app.get("/get-water-pressure")
     async def get_water_pressure():
         value = await _cached("water_pressure", settings.cache_ttl_water_pressure, client.get_water_pressure)
@@ -440,6 +457,16 @@ INDEX_HTML = """<!doctype html>
   </p>
   <p><small class="muted">Quando OFF, il server serve solo dalla cache (anche scaduta) e <strong>non chiama Vaillant</strong>.
     Usalo per liberare l'API mentre usi l'app myVaillant ufficiale o quando hai sforato la quota.</small></p>
+</div>
+
+<div class="panel">
+  <h2>Modes and Presets</h2>
+  <p>
+    Activate heating / DHW program:
+    <button onclick="applyPreset('AT_HOME')">At Home</button>
+    <button onclick="applyPreset('HOLIDAY')">Holiday</button>
+    <button onclick="applyPreset('COMING_BACK')">Coming Back</button>
+  </p>
 </div>
 
 <div class="panel">
@@ -651,6 +678,19 @@ async function setZoneSetpoint(idx) {
     alert('Errore ' + res.status + ': ' + JSON.stringify(res.body));
     return;
   }
+  setTimeout(refreshZones, 500);
+  setTimeout(refreshCache, 800);
+}
+
+async function applyPreset(mode) {
+  if (!confirm('Activate preset ' + mode + '?')) return;
+  const r = await fetch('/apply-preset/' + mode);
+  const res = await handleResponse(r);
+  if (!res.ok) {
+    alert('Error ' + res.status + ': ' + JSON.stringify(res.body));
+    return;
+  }
+  alert('Preset ' + mode + ' applied successfully!');
   setTimeout(refreshZones, 500);
   setTimeout(refreshCache, 800);
 }

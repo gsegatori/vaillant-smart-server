@@ -93,6 +93,21 @@ class FakeVaillantClient:
             return {"error": "DHW system not found"}
         return {"index": idx, "temperature": temperature, "message": f"DHW Temperature set to {temperature}°C"}
 
+    @property
+    def presets(self):
+        from app.config import DEFAULT_PRESETS
+        return getattr(self, "_presets", DEFAULT_PRESETS)
+
+    async def apply_preset(self, preset: str):
+        self._bump("apply_preset")
+        preset_upper = preset.upper()
+        p = self.presets.get(preset_upper)
+        name = p.name if p else preset_upper
+        return {"message": f"{name} - done successfully."}
+
+    async def enable_mode(self, mode: str):
+        return await self.apply_preset(mode)
+
     async def get_system_info(self):
         self._bump("get_system_info")
         return {"home": "fake", "zones": 3}
