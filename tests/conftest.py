@@ -97,6 +97,13 @@ class FakeVaillantClient:
         self._bump("get_system_info")
         return {"home": "fake", "zones": 3}
 
+    async def get_rts(self):
+        self._bump("get_rts")
+        return {
+            "rts_statistics": {"flow_temp": 32.5, "return_temp": 28.0},
+            "update_timestamp": "2026-08-22 21:00:00",
+        }
+
 
 @pytest.fixture
 def tmp_cache(tmp_path):

@@ -364,6 +364,10 @@ def create_app(
     async def get_system_info():
         return await _cached("system_info", settings.cache_ttl_system_info, client.get_system_info)
 
+    @app.get("/get-rts")
+    async def get_rts():
+        return await _cached("rts", settings.cache_ttl_rts, client.get_rts)
+
     return app
 
 
@@ -476,6 +480,7 @@ INDEX_HTML = """<!doctype html>
     <button onclick="probe('/boiler-consumption-current-month')">/boiler-consumption-current-month</button>
     <button onclick="probe('/boiler-consumption-current-year')">/boiler-consumption-current-year</button>
     <button onclick="probe('/get-system-info')">/get-system-info</button>
+    <button onclick="probe('/get-rts')">/get-rts</button>
   </p>
   <pre id="probe-out">(clicca un endpoint per vederne la risposta)</pre>
 </div>

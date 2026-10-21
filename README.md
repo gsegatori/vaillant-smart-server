@@ -27,6 +27,7 @@ Caratteristiche chiave per **non farsi rate-limitare da Vaillant**:
 | GET | `/dhw-set-temp/{idx}/{temp}` | — | set DHW (Domestic Hot Water) temperature, updates/invalidates cache |
 | GET | `/get-water-pressure` | 10min | pressione bar |
 | GET | `/get-system-info` | 5min | dump intero system serializzato |
+| GET | `/get-rts` | 10min | real-time statistics (Real Time Statistics) |
 
 ### Infra
 
