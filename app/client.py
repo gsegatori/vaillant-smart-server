@@ -18,7 +18,10 @@ from zoneinfo import ZoneInfo
 
 import aiohttp
 from myPyllant.api import MyPyllantAPI
-from myPyllant.enums import DeviceDataBucketResolution, ZoneOperatingMode
+from myPyllant.enums import DeviceDataBucketResolution, DHWOperationMode, ZoneOperatingMode
+from myPyllant.models import ZoneTimeProgram
+
+from app.config import DEFAULT_PRESETS, Preset
 
 log = logging.getLogger(__name__)
 
@@ -51,6 +54,7 @@ class VaillantClient:
         retries: int = 3,
         backoff_base_s: float = 2.0,
         system_cache_ttl_s: float = 60.0,
+        presets: dict[str, Preset] = DEFAULT_PRESETS,
     ) -> None:
         self._user = user
         self._password = password
@@ -58,6 +62,7 @@ class VaillantClient:
         self._country = country
         self._retries = retries
         self._backoff = backoff_base_s
+        self.presets = presets
         self._api: MyPyllantAPI | None = None
         self._login_lock = asyncio.Lock()
 
@@ -352,6 +357,54 @@ class VaillantClient:
             return {"index": idx, "temperature": temperature, "message": f"DHW Temperature set to {temperature}°C"}
 
         return await self._with_retry(_do)
+
+    async def _apply_preset(self, preset: Preset) -> dict[str, Any]:
+        log.info("%s - starting...", preset.name)
+
+        async def _do():
+            system = await self._get_cached_system()
+            api = await self._ensure_authenticated()
+
+            dhw_output_list = []
+            if getattr(system, "domestic_hot_water", None):
+                log.info("%s - updating DHW mode to %s...", preset.name, preset.dhw_mode)
+                for dhw in system.domestic_hot_water:
+                    updated_dhw = await api.set_domestic_hot_water_operation_mode(dhw, mode=preset.dhw_mode)
+                    dhw_output_list.append(f"dhw {getattr(updated_dhw, 'index', 0)} done successfully")
+
+            log.info("%s - updating heating time program...", preset.name)
+            heating_time_program = ZoneTimeProgram(
+                monday=preset.heating_plan,
+                tuesday=preset.heating_plan,
+                wednesday=preset.heating_plan,
+                thursday=preset.heating_plan,
+                friday=preset.heating_plan,
+                saturday=preset.heating_plan,
+                sunday=preset.heating_plan,
+            )
+            zone_output_list = []
+            for zone in system.zones:
+                updated_zone = await api.set_zone_time_program(zone, "heating", heating_time_program)
+                zone_output_list.append(f"zone {getattr(updated_zone, 'index', 0)} done successfully")
+
+            self.invalidate_system_cache()
+            return {
+                "message": f"{preset.name} - done successfully.",
+                "dhw_updates": "\n".join(dhw_output_list),
+                "zone_updates": "\n".join(zone_output_list),
+            }
+
+        return await self._with_retry(_do)
+
+    async def apply_preset(self, preset: str) -> dict[str, Any]:
+        preset_upper = preset.upper()
+        if preset_upper not in self.presets:
+            raise ValueError(f"Unknown preset '{preset}'. Valid presets: {list(self.presets.keys())}")
+        return await self._apply_preset(self.presets[preset_upper])
+
+    # Aliases for backward compatibility
+    apply_mode = apply_preset
+    enable_mode = apply_preset
 
     async def get_system_info(self) -> dict[str, Any]:
         async def _do():

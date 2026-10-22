@@ -300,3 +300,157 @@ async def test_vaillant_client_get_rts_uses_system_timezone():
     assert res["rts_statistics"] == {"flow_temp": 30.0}
     dt = datetime.fromisoformat(res["update_timestamp"])
     assert dt.tzinfo is not None
+
+
+def test_apply_preset(client, fake_client):
+    r = client.get("/apply-preset/at_home")
+    assert r.status_code == 200
+    assert fake_client.calls.get("apply_preset") == 1
+    assert r.json()["message"] == "At Home - done successfully."
+
+    r = client.get("/apply-preset/HOLIDAY")
+    assert r.status_code == 200
+    assert fake_client.calls.get("apply_preset") == 2
+    assert r.json()["message"] == "Holiday - done successfully."
+
+    r = client.get("/apply-preset/coming_back")
+    assert r.status_code == 200
+    assert fake_client.calls.get("apply_preset") == 3
+    assert r.json()["message"] == "Coming Back - done successfully."
+
+    # Verify /set-away-mode is removed
+    r = client.get("/set-away-mode/at_home")
+    assert r.status_code == 404
+
+
+def test_apply_preset_invalid(client):
+    r = client.get("/apply-preset/invalid_mode")
+    assert r.status_code == 400
+
+
+def test_preset_modes_configuration():
+    from app.config import DEFAULT_PRESETS, Preset, Settings
+    from myPyllant.enums import DHWOperationMode
+    from myPyllant.models import ZoneTimeProgramDay
+
+    settings = Settings()
+    assert set(settings.presets.keys()) == {"AT_HOME", "HOLIDAY", "COMING_BACK"}
+    assert set(DEFAULT_PRESETS.keys()) == {"AT_HOME", "HOLIDAY", "COMING_BACK"}
+
+    assert DEFAULT_PRESETS["AT_HOME"].name == "At Home"
+    assert DEFAULT_PRESETS["AT_HOME"].dhw_mode == DHWOperationMode.TIME_CONTROLLED
+    assert DEFAULT_PRESETS["HOLIDAY"].name == "Holiday"
+    assert DEFAULT_PRESETS["HOLIDAY"].dhw_mode == DHWOperationMode.OFF
+    assert DEFAULT_PRESETS["COMING_BACK"].name == "Coming Back"
+    assert DEFAULT_PRESETS["COMING_BACK"].dhw_mode == DHWOperationMode.TIME_CONTROLLED
+
+    for mode_name, cfg in DEFAULT_PRESETS.items():
+        assert isinstance(cfg, Preset)
+        assert isinstance(cfg.dhw_mode, (DHWOperationMode, str))
+        assert len(cfg.heating_plan) > 0
+        preset_dict = cfg.to_dict()
+        assert preset_dict["name"] == cfg.name
+        assert preset_dict["dhw_mode"] == cfg.dhw_mode
+        assert "heating_plan" in preset_dict
+        for slot in cfg.heating_plan:
+            assert isinstance(slot, ZoneTimeProgramDay)
+            assert 0 <= slot.start_time < slot.end_time <= 1440
+            assert isinstance(slot.setpoint, (int, float))
+        for slot_dict in preset_dict["heating_plan"]:
+            assert 0 <= slot_dict["start_time"] < slot_dict["end_time"] <= 1440
+            assert isinstance(slot_dict["setpoint"], (int, float))
+
+
+def test_config_example_file(monkeypatch):
+    from pathlib import Path
+    from app.config import Settings
+    from myPyllant.enums import DHWOperationMode
+
+    example_path = Path(__file__).resolve().parent.parent / "config.example.yaml"
+    assert example_path.is_file()
+
+    monkeypatch.setenv("VAILLANT_CONFIG_FILE", str(example_path))
+    s = Settings()
+    assert set(s.presets.keys()) == {"AT_HOME", "HOLIDAY", "COMING_BACK"}
+    assert s.presets["AT_HOME"].name == "At Home"
+    assert s.presets["AT_HOME"].dhw_mode == DHWOperationMode.TIME_CONTROLLED
+    assert len(s.presets["AT_HOME"].heating_plan) == 5
+    assert s.presets["HOLIDAY"].dhw_mode == DHWOperationMode.OFF
+    assert len(s.presets["HOLIDAY"].heating_plan) == 3
+    assert s.presets["COMING_BACK"].dhw_mode == DHWOperationMode.TIME_CONTROLLED
+    assert len(s.presets["COMING_BACK"].heating_plan) == 3
+
+
+def test_config_sources_combination_and_precedence(tmp_path, monkeypatch):
+    from app.config import Settings
+
+    env_file = tmp_path / "custom.env"
+    yaml_file = tmp_path / "custom.yaml"
+
+    # cache_ttl_zone_info is in both (env should win)
+    # cache_ttl_water_pressure is only in env
+    # cache_ttl_gas is only in yaml
+    env_file.write_text("CACHE_TTL_ZONE_INFO=888\nCACHE_TTL_WATER_PRESSURE=444\n")
+    yaml_file.write_text("cache_ttl_zone_info: 999\ncache_ttl_gas: 1234\n")
+
+    monkeypatch.setenv("VAILLANT_ENV_FILE", str(env_file))
+    monkeypatch.setenv("VAILLANT_CONFIG_FILE", str(yaml_file))
+
+    s = Settings()
+    # Combines keys from both sources:
+    assert s.cache_ttl_water_pressure == 444
+    assert s.cache_ttl_gas == 1234
+    # .env takes precedence over YAML when key is defined in both:
+    assert s.cache_ttl_zone_info == 888
+
+
+def test_preset_configuration_validation(tmp_path, monkeypatch):
+    import pytest
+    from pydantic import ValidationError
+    from app.config import DEFAULT_PRESETS, Settings
+
+    # 1. Config with no presets -> defaults to DEFAULT_PRESETS
+    no_presets_file = tmp_path / "no_presets.yaml"
+    no_presets_file.write_text("bind_port: 5050\n")
+    monkeypatch.setenv("VAILLANT_CONFIG_FILE", str(no_presets_file))
+    s1 = Settings()
+    assert s1.presets == DEFAULT_PRESETS
+
+    # 2. Config with empty presets (None or null or nil) -> raises ValidationError
+    for null_val in ["null", "~", "", "nil"]:
+        empty_presets_file = tmp_path / f"empty_presets_{null_val or 'blank'}.yaml"
+        if null_val == "":
+            empty_presets_file.write_text("presets:\n")
+        else:
+            empty_presets_file.write_text(f"presets: {null_val}\n")
+        monkeypatch.setenv("VAILLANT_CONFIG_FILE", str(empty_presets_file))
+        with pytest.raises(ValidationError):
+            Settings()
+
+    with pytest.raises(ValidationError):
+        Settings(presets=None)
+
+    # 3. Config with an empty list of presets -> raises ValidationError
+    empty_list_file = tmp_path / "empty_list.yaml"
+    empty_list_file.write_text("presets: []\n")
+    monkeypatch.setenv("VAILLANT_CONFIG_FILE", str(empty_list_file))
+    with pytest.raises(ValidationError):
+        Settings()
+
+    with pytest.raises(ValidationError):
+        Settings(presets=[])
+
+    # 4. Config with a preset with an empty list of ZoneTimeProgram (heating_plan: [])
+    empty_plan_file = tmp_path / "empty_plan.yaml"
+    empty_plan_file.write_text(
+        "presets:\n"
+        "  AWAY_CUSTOM:\n"
+        "    name: \"Away Custom\"\n"
+        "    dhw_mode: \"OFF\"\n"
+        "    heating_plan: []\n"
+    )
+    monkeypatch.setenv("VAILLANT_CONFIG_FILE", str(empty_plan_file))
+    s4 = Settings()
+    assert "AWAY_CUSTOM" in s4.presets
+    assert s4.presets["AWAY_CUSTOM"].name == "Away Custom"
+    assert s4.presets["AWAY_CUSTOM"].heating_plan == []
