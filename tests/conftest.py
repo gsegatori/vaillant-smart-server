@@ -112,6 +112,31 @@ class FakeVaillantClient:
         self._bump("get_system_info")
         return {"home": "fake", "zones": 3}
 
+    async def get_system_info_and_data(self):
+        self._bump("get_system_info_and_data")
+        return {
+            "home": "fake",
+            "zones": 3,
+            "devices": [{"name": "HeatPump", "data": []}],
+            "my_energy_data": {
+                "consumed_total": 10.0,
+                "generated_total": 35.0,
+                "cop_overall_day": 3.5,
+            },
+        }
+
+    async def get_device_data(self):
+        self._bump("get_device_data")
+        return {
+            "update_timestamp": "2026-08-22 21:00:00",
+            "devices": [{"name": "HeatPump", "data": []}],
+            "my_energy_data": {
+                "consumed_total": 10.0,
+                "generated_total": 35.0,
+                "cop_overall_day": 3.5,
+            },
+        }
+
     async def get_rts(self):
         self._bump("get_rts")
         return {

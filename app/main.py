@@ -353,6 +353,7 @@ def create_app(
         if not cache.patch_value(f"dhw_info_{idx}", desired_temperature=temp, temperature=temp):
             cache.invalidate(f"dhw_info_{idx}")
         cache.invalidate("system_info")
+        cache.invalidate("system_info_and_data")
         await cache.persist_now()
         return result
 
@@ -380,6 +381,18 @@ def create_app(
     @app.get("/get-system-info")
     async def get_system_info():
         return await _cached("system_info", settings.cache_ttl_system_info, client.get_system_info)
+
+    @app.get("/get-system-info-and-data")
+    async def get_system_info_and_data():
+        return await _cached(
+            "system_info_and_data",
+            settings.cache_ttl_system_info_and_data,
+            client.get_system_info_and_data,
+        )
+
+    @app.get("/get-device-data")
+    async def get_device_data():
+        return await _cached("device_data", settings.cache_ttl_device_data, client.get_device_data)
 
     @app.get("/get-rts")
     async def get_rts():
@@ -507,6 +520,8 @@ INDEX_HTML = """<!doctype html>
     <button onclick="probe('/boiler-consumption-current-month')">/boiler-consumption-current-month</button>
     <button onclick="probe('/boiler-consumption-current-year')">/boiler-consumption-current-year</button>
     <button onclick="probe('/get-system-info')">/get-system-info</button>
+    <button onclick="probe('/get-system-info-and-data')">/get-system-info-and-data</button>
+    <button onclick="probe('/get-device-data')">/get-device-data</button>
     <button onclick="probe('/get-rts')">/get-rts</button>
   </p>
   <pre id="probe-out">(clicca un endpoint per vederne la risposta)</pre>
