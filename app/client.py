@@ -413,6 +413,76 @@ class VaillantClient:
 
         return await self._with_retry(_do)
 
+    async def get_system_info_and_data(self) -> dict[str, Any]:
+        async def _do():
+            api = await self._ensure_authenticated()
+            system = await self._get_cached_system()
+            now_datetime = datetime.now()
+
+            device_export_list = []
+            for device in getattr(system, "devices", []):
+                try:
+                    data = [
+                        _prepare_device_data(d)
+                        async for d in api.get_data_by_device(
+                            device, DeviceDataBucketResolution.DAY, now_datetime, now_datetime
+                        )
+                    ]
+                except Exception as e:
+                    log.warning("get_system_info_and_data: could not fetch device data for %s: %s", device, e)
+                    data = []
+                device_dict = (
+                    device.prepare_dict()
+                    if hasattr(device, "prepare_dict")
+                    else dict(getattr(device, "__dict__", {}))
+                )
+                device_dict.pop("data", None)
+                device_dict["data"] = data
+                device_export_list.append(device_dict)
+
+            system_dict = (
+                system.prepare_dict()
+                if hasattr(system, "prepare_dict")
+                else dict(getattr(system, "__dict__", {}))
+            )
+            system_dict["devices"] = device_export_list
+            system_dict["my_energy_data"] = _extract_energy_data(device_export_list)
+            return _serialize(system_dict)
+
+        return await self._with_retry(_do)
+
+    async def get_device_data(self) -> dict[str, Any]:
+        async def _do():
+            api = await self._ensure_authenticated()
+            system = await self._get_cached_system()
+            now_datetime = datetime.now()
+
+            device_export_list = []
+            for device in getattr(system, "devices", []):
+                data = [
+                    _prepare_device_data(d)
+                    async for d in api.get_data_by_device(
+                        device, DeviceDataBucketResolution.DAY, now_datetime, now_datetime
+                    )
+                ]
+                device_dict = (
+                    device.prepare_dict()
+                    if hasattr(device, "prepare_dict")
+                    else dict(getattr(device, "__dict__", {}))
+                )
+                device_dict.pop("data", None)
+                device_dict["data"] = data
+                device_export_list.append(device_dict)
+
+            result_dict: dict[str, Any] = {
+                "update_timestamp": str(datetime.now()),
+                "devices": device_export_list,
+                "my_energy_data": _extract_energy_data(device_export_list),
+            }
+            return _serialize(result_dict)
+
+        return await self._with_retry(_do)
+
     async def get_rts(self) -> dict[str, Any]:
         async def _do():
             api = await self._ensure_authenticated()
@@ -438,6 +508,85 @@ class VaillantClient:
 
         return await self._with_retry(_do)
 
+
+def _prepare_device_data(device_data: Any) -> dict[str, Any]:
+    if hasattr(device_data, "prepare_dict"):
+        data = device_data.prepare_dict()
+    elif isinstance(device_data, dict):
+        data = dict(device_data)
+    else:
+        data = dict(getattr(device_data, "__dict__", {}))
+    data.pop("device", None)
+    return data
+
+
+def _extract_energy_data(device_export_list: list[dict[str, Any]]) -> dict[str, Any]:
+    my_energy_data: dict[str, Any] = {}
+    if not device_export_list or "data" not in device_export_list[0]:
+        return my_energy_data
+
+    try:
+        for datapoint in device_export_list[0]["data"]:
+            op_mode = datapoint.get("operation_mode")
+            energy_type = datapoint.get("energy_type")
+            data_points = datapoint.get("data", [])
+            val = data_points[0].get("value") if data_points else None
+
+            if op_mode == "DOMESTIC_HOT_WATER":
+                if energy_type == "CONSUMED_ELECTRICAL_ENERGY":
+                    my_energy_data["consumed_dhw"] = val
+                elif energy_type == "EARNED_ENVIRONMENT_ENERGY":
+                    my_energy_data["earned_dhw"] = val
+                elif energy_type == "HEAT_GENERATED":
+                    my_energy_data["generated_dhw"] = val
+
+            elif op_mode == "HEATING":
+                if energy_type == "CONSUMED_ELECTRICAL_ENERGY":
+                    my_energy_data["consumed_heating"] = val
+                elif energy_type == "EARNED_ENVIRONMENT_ENERGY":
+                    my_energy_data["earned_heating"] = val
+                elif energy_type == "HEAT_GENERATED":
+                    my_energy_data["generated_heating"] = val
+    except Exception as e:
+        log.error("Could not extract energy data: %s", e, exc_info=True)
+    else:
+        if "consumed_dhw" in my_energy_data and "consumed_heating" in my_energy_data:
+            c_dhw = my_energy_data["consumed_dhw"] or 0
+            c_heat = my_energy_data["consumed_heating"] or 0
+            my_energy_data["consumed_total"] = c_heat + c_dhw
+
+        if "earned_dhw" in my_energy_data and "earned_heating" in my_energy_data:
+            e_dhw = my_energy_data["earned_dhw"] or 0
+            e_heat = my_energy_data["earned_heating"] or 0
+            my_energy_data["earned_total"] = e_heat + e_dhw
+
+        if "generated_dhw" in my_energy_data and "generated_heating" in my_energy_data:
+            g_dhw = my_energy_data["generated_dhw"] or 0
+            g_heat = my_energy_data["generated_heating"] or 0
+            my_energy_data["generated_total"] = g_heat + g_dhw
+
+        if "consumed_dhw" in my_energy_data and "generated_dhw" in my_energy_data:
+            c_dhw = my_energy_data["consumed_dhw"]
+            g_dhw = my_energy_data["generated_dhw"]
+            my_energy_data["cop_dhw_day"] = (
+                round(g_dhw / c_dhw, 2) if (c_dhw and g_dhw is not None) else 0
+            )
+
+        if "consumed_heating" in my_energy_data and "generated_heating" in my_energy_data:
+            c_heat = my_energy_data["consumed_heating"]
+            g_heat = my_energy_data["generated_heating"]
+            my_energy_data["cop_heating_day"] = (
+                round(g_heat / c_heat, 2) if (c_heat and g_heat is not None) else 0
+            )
+
+        if "consumed_total" in my_energy_data and "generated_total" in my_energy_data:
+            c_tot = my_energy_data["consumed_total"]
+            g_tot = my_energy_data["generated_total"]
+            my_energy_data["cop_overall_day"] = (
+                round(g_tot / c_tot, 2) if (c_tot and g_tot is not None) else 0
+            )
+
+    return my_energy_data
 
 def _serialize(obj: Any) -> Any:
     """Serializer "best effort" verso JSON-safe primitives."""

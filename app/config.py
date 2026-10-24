@@ -128,6 +128,8 @@ class Settings(BaseSettings):
     cache_ttl_water_pressure: int = 600
     cache_ttl_gas: int = 14400
     cache_ttl_rts: int = 600
+    cache_ttl_device_data: int = 3600
+    cache_ttl_system_info_and_data: int = 300
 
     retries: int = 3
     retry_backoff_base_s: float = 2.0

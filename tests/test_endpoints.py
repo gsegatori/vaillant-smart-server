@@ -454,3 +454,22 @@ def test_preset_configuration_validation(tmp_path, monkeypatch):
     assert "AWAY_CUSTOM" in s4.presets
     assert s4.presets["AWAY_CUSTOM"].name == "Away Custom"
     assert s4.presets["AWAY_CUSTOM"].heating_plan == []
+
+
+def test_get_system_info_and_data(client, fake_client):
+    r = client.get("/get-system-info-and-data")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["home"] == "fake"
+    assert "devices" in body
+    assert body["my_energy_data"]["cop_overall_day"] == 3.5
+    assert fake_client.calls["get_system_info_and_data"] == 1
+
+
+def test_get_device_data(client, fake_client):
+    r = client.get("/get-device-data")
+    assert r.status_code == 200
+    body = r.json()
+    assert "devices" in body
+    assert body["my_energy_data"]["cop_overall_day"] == 3.5
+    assert fake_client.calls["get_device_data"] == 1
