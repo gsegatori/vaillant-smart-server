@@ -18,6 +18,7 @@ vaillant_user: "your-email@example.com"
 vaillant_password: "secretpassword"
 vaillant_brand: "vaillant"
 vaillant_country: "italy"
+language: "en"  # "en" or "it"
 
 # --- Persistent cache (path in container or on filesystem) ---
 cache_file: "/data/cache.json"

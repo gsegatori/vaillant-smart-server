@@ -118,6 +118,7 @@ class Settings(BaseSettings):
     vaillant_password: str = ""
     vaillant_brand: str = "vaillant"
     vaillant_country: str = "italy"
+    language: str = "en"
 
     cache_file: Path = Path("/data/cache.json")
 

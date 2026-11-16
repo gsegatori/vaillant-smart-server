@@ -473,3 +473,193 @@ def test_get_device_data(client, fake_client):
     assert "devices" in body
     assert body["my_energy_data"]["cop_overall_day"] == 3.5
     assert fake_client.calls["get_device_data"] == 1
+
+
+def test_language_option_in_index_html(client):
+    r = client.get("/")
+    assert r.status_code == 200
+    assert "lang-btn-it" in r.text
+    assert "lang-btn-en" in r.text
+    assert 'SERVER_LANG = "en"' in r.text
+
+    # Change language via admin endpoint
+    r_set = client.post("/admin/language/it")
+    assert r_set.status_code == 200
+    assert r_set.json()["language"] == "it"
+
+    r_it = client.get("/")
+    assert r_it.status_code == 200
+    assert 'SERVER_LANG = "it"' in r_it.text
+
+    # Switch back to en
+    client.post("/admin/language/en")
+
+
+def test_index_html_javascript_validity(client, tmp_path):
+    import re
+    import shutil
+    import subprocess
+
+    for lang in ["en", "it"]:
+        client.post(f"/admin/language/{lang}")
+        r = client.get("/")
+        assert r.status_code == 200
+        html = r.text
+
+        # Extract embedded JavaScript
+        m = re.search(r"<script>(.*?)</script>", html, re.DOTALL)
+        assert m, f"No <script> tag found in index HTML for lang={lang}"
+        js_code = m.group(1)
+
+        # Validate presence of essential functions
+        for fn_name in [
+            "setLanguage",
+            "refreshStatus",
+            "refreshCache",
+            "refreshZones",
+            "applyPreset",
+            "setDhwTemp",
+            "enableMaster",
+            "disableMaster",
+            "clearCache",
+            "probe",
+        ]:
+            assert f"function {fn_name}" in js_code or f"async function {fn_name}" in js_code
+
+        # If node is available, verify syntax parsing without errors
+        node_bin = shutil.which("node")
+        if node_bin:
+            script_file = tmp_path / f"test_script_{lang}.js"
+            script_file.write_text(js_code, encoding="utf-8")
+            res = subprocess.run([node_bin, "--check", str(script_file)], capture_output=True, text=True)
+            assert res.returncode == 0, f"Node syntax error in index.html JS ({lang}):\n{res.stderr}"
+
+    # Reset back to en
+    client.post("/admin/language/en")
+
+
+def test_quota_message_language_english_and_italian(client, fake_client):
+    # Quota exceeded message (originally Italian) switches between en and it
+    fake_client.force_quota = ("00:10:00", "test")
+    client.post("/admin/language/en")
+    r_quota_en = client.get("/dhw-set-temp/0/50")
+    assert r_quota_en.status_code == 429
+    assert r_quota_en.json()["detail"]["message"] == "Vaillant API quota exceeded, replenish in 00:10:00"
+
+    client.post("/admin/enable")
+    client.post("/admin/language/it")
+    r_quota_it = client.get("/dhw-set-temp/0/50")
+    assert r_quota_it.status_code == 429
+    assert r_quota_it.json()["detail"]["message"] == "Quota API Vaillant esaurita, replenish in 00:10:00"
+    fake_client.force_quota = None
+    client.post("/admin/enable")
+
+    # Already-English API responses/errors stay in English regardless of language
+    r_dhw_it = client.get("/dhw-set-temp/0/55")
+    assert r_dhw_it.status_code == 200
+    assert r_dhw_it.json()["message"] == "DHW Temperature set to 55.0°C"
+
+    r_preset_it = client.get("/apply-preset/at_home")
+    assert r_preset_it.status_code == 200
+    assert r_preset_it.json()["message"] == "At Home - done successfully."
+
+    r_zone_it = client.get("/zone-info/99")
+    assert r_zone_it.status_code == 404
+    assert r_zone_it.json()["detail"] == "zone not found"
+
+    client.post("/admin/language/en")
+
+    # Invalid language admin test
+    r_bad_lang = client.post("/admin/language/fr")
+    assert r_bad_lang.status_code == 400
+
+
+def test_settings_language_configuration(tmp_path):
+    from app.cache import PersistentCache
+    from app.config import Settings
+    from app.main import create_app
+    from app.messages import get_current_language, set_current_language
+
+    settings_it = Settings(
+        vaillant_user="user@example.com",
+        vaillant_password="secretpassword",
+        language="it",
+        cache_file=tmp_path / "cache.json",
+    )
+    assert settings_it.language == "it"
+
+    app_it = create_app(settings=settings_it, cache=PersistentCache(tmp_path / "cache.json"))
+    assert app_it.state.language == "it"
+    assert get_current_language() == "it"
+
+    set_current_language("en")
+
+
+def test_server_logging_language_internationalization(client, fake_client, caplog):
+    import logging
+
+    with caplog.at_level(logging.INFO):
+        client.post("/admin/language/en")
+        assert "Language changed to en" in caplog.text
+
+        # Originally-English log stays in English
+        caplog.clear()
+        client.post("/admin/enable")
+        assert "upstream ENABLED" in caplog.text
+
+        # Originally-Italian logs translate between en and it
+        caplog.clear()
+        client.post("/admin/disable")
+        assert "upstream DISABLED (cache-only mode, auto-resume cancelled)" in caplog.text
+
+        client.post("/admin/enable")
+        caplog.clear()
+        fake_client.force_quota = ("00:10:00", "test")
+        client.get("/dhw-set-temp/0/50")
+        assert "Auto-DISABLE upstream due to Vaillant quota" in caplog.text
+        fake_client.force_quota = None
+
+        caplog.clear()
+        client.post("/admin/enable")
+        assert "upstream ENABLED (manual override of quota auto-resume)" in caplog.text
+
+        caplog.clear()
+        client.post("/admin/language/it")
+        assert "Language changed to it" in caplog.text
+
+        # Originally-English logs remain in English even when language is 'it'
+        caplog.clear()
+        client.post("/admin/enable")
+        assert "upstream ENABLED" in caplog.text
+        client.post("/admin/clear-cache")
+        assert "cache cleared" in caplog.text
+
+        # Originally-Italian logs render in Italian when language is 'it'
+        caplog.clear()
+        client.post("/admin/disable")
+        assert "upstream DISABLED (cache-only mode, auto-resume cancellato)" in caplog.text
+
+        caplog.clear()
+        client.post("/admin/enable")
+        fake_client.force_quota = ("00:10:00", "test")
+        client.get("/dhw-set-temp/0/50")
+        assert "Auto-DISABLE upstream per quota Vaillant" in caplog.text
+        fake_client.force_quota = None
+
+        caplog.clear()
+        client.post("/admin/enable")
+        assert "upstream ENABLED (manual override del quota auto-resume)" in caplog.text
+
+        client.post("/admin/language/en")
+
+
+def test_current_language_dict_pointer():
+    import app.messages as msgs
+
+    msgs.set_current_language("it")
+    assert msgs._cur_lang_msgs is msgs.MESSAGES["it"]
+    assert msgs.get_message("quota_exceeded", time="00:05:00") == "Quota API Vaillant esaurita, replenish in 00:05:00"
+
+    msgs.set_current_language("en")
+    assert msgs._cur_lang_msgs is msgs.MESSAGES["en"]
+    assert msgs.get_message("quota_exceeded", time="00:05:00") == "Vaillant API quota exceeded, replenish in 00:05:00"
