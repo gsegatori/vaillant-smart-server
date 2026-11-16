@@ -82,6 +82,13 @@ Pattern (come per Rainbird):
 
 Cosi' col tap di un bottone "blocca tutto" liberi Vaillant per usare l'app ufficiale.
 
+## Language / Lingua
+
+User messages, operational logs, and the Web Admin UI can be displayed in English or Italian (`en` / `it`):
+- **Web Admin UI**: Toggle language instantly with the top-right `[ 🇮🇹 Italiano | 🇬🇧 English ]` buttons. The preference is persisted in browser `localStorage` and synchronized with the backend.
+- **Environment**: Set `LANGUAGE=en` or `LANGUAGE=it` in `.env` (or `language: "en"` in `config.yaml`) to set the server-wide default language.
+- **Admin API**: `POST /admin/language/{lang}` dynamically switches the active language for user responses and operational server logs at runtime.
+
 ## Struttura
 
 ```
@@ -90,6 +97,7 @@ app/
 ├── config.py         pydantic-settings, lookup .env in piu' posti
 ├── cache.py          PersistentCache JSON con TTL/serve-stale/single-flight
 ├── client.py         VaillantClient wrapper myPyllant + retry/backoff
+├── messages.py       i18n message catalogs (English and Italian)
 └── main.py           FastAPI app + endpoints + middleware access log
 
 tests/                17 test unitari (cache + endpoint con FakeClient mocked)

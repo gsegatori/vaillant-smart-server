@@ -14,6 +14,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from app.cache import PersistentCache
 from app.client import VaillantClient, VaillantQuotaExceeded
 from app.config import Settings, get_settings
+from app.messages import get_current_language, get_message as _, set_current_language
 
 
 def _parse_replenish_to_seconds(replenish: str) -> int:
@@ -51,9 +52,10 @@ def create_app(
 ) -> FastAPI:
     settings = settings or get_settings()
     _configure_logging(settings)
+    set_current_language(settings.language)
 
     if not settings.vaillant_user or not settings.vaillant_password:
-        log.warning("VAILLANT_USER o VAILLANT_PASSWORD non impostati nel .env")
+        log.warning(_("log_env_credentials_missing"))
 
     cache = cache or PersistentCache(settings.cache_file)
     client = client or VaillantClient(
@@ -77,10 +79,7 @@ def create_app(
                     continue
                 now = datetime.now(timezone.utc)
                 if now >= resume_at:
-                    log.info(
-                        "Quota window scaduta (era %s), AUTO-ENABLE upstream",
-                        resume_at.strftime("%H:%M:%S"),
-                    )
+                    log.info(_("log_quota_window_expired", time=resume_at.strftime("%H:%M:%S")))
                     app.state.enabled = True
                     app.state.quota_resume_at = None
             except asyncio.CancelledError:
@@ -108,6 +107,7 @@ def create_app(
     app.state.settings = settings
     app.state.cache = cache
     app.state.client = client
+    app.state.language = get_current_language()
     app.state.enabled = True  # master kill-switch (default ON)
     # Se settato (datetime UTC), un background task riabilitera' upstream a
     # quell'orario. Anche /admin/disable e /admin/enable lo cancellano.
@@ -122,16 +122,16 @@ def create_app(
     def _trigger_quota_lockout(e: VaillantQuotaExceeded) -> None:
         secs = _parse_replenish_to_seconds(e.replenish_in)
         if secs <= 0:
-            log.warning("Quota lockout senza replenish_in parsabile (%s); upstream lasciato com'e'", e.replenish_in)
+            log.warning(_("log_quota_lockout_unparseable", replenish=e.replenish_in))
             return
         resume_at = datetime.now(timezone.utc) + timedelta(seconds=secs + QUOTA_RESUME_BUFFER_S)
         was_enabled = app.state.enabled
         app.state.enabled = False
         app.state.quota_resume_at = resume_at
+        extra = "" if was_enabled else _("log_was_already_off")
         log.warning(
-            "Auto-DISABLE upstream per quota Vaillant (Vaillant dice %s, riprendo alle %s UTC con +%ds buffer)%s",
-            e.replenish_in, resume_at.strftime("%H:%M:%S"), QUOTA_RESUME_BUFFER_S,
-            "" if was_enabled else " (era gia' OFF)",
+            _("log_quota_lockout_auto_disable", replenish=e.replenish_in,
+              resume=resume_at.strftime("%H:%M:%S"), buffer=QUOTA_RESUME_BUFFER_S, extra=extra)
         )
 
     def _quota_http_exception(e: VaillantQuotaExceeded) -> HTTPException:
@@ -141,7 +141,7 @@ def create_app(
             detail={
                 "error": "vaillant_quota_exceeded",
                 "replenish_in": e.replenish_in,
-                "message": f"Quota API Vaillant esaurita, replenish in {e.replenish_in}",
+                "message": _("quota_exceeded", time=e.replenish_in),
                 "vaillant_message": e.message,
             },
         )
@@ -183,7 +183,7 @@ def create_app(
 
     @app.get("/", response_class=HTMLResponse)
     async def index():
-        return INDEX_HTML
+        return HTMLResponse(INDEX_HTML.replace("__SERVER_LANG__", get_current_language()))
 
     @app.get("/healthz")
     async def healthz():
@@ -218,7 +218,7 @@ def create_app(
         app.state.enabled = True
         if app.state.quota_resume_at is not None:
             app.state.quota_resume_at = None
-            log.info("upstream ENABLED (manual override del quota auto-resume)")
+            log.info(_("log_upstream_enabled_manual"))
         else:
             log.info("upstream ENABLED")
         return {"enabled": True}
@@ -229,7 +229,7 @@ def create_app(
         # Manuale: cancello eventuale auto-resume cosi' resta OFF finche'
         # l'utente decide diversamente.
         app.state.quota_resume_at = None
-        log.info("upstream DISABLED (cache-only mode, auto-resume cancellato)")
+        log.info(_("log_upstream_disabled"))
         return {"enabled": False}
 
     @app.post("/admin/clear-cache")
@@ -238,6 +238,16 @@ def create_app(
         await cache.persist_now()
         log.info("cache cleared (%d entries)", n)
         return {"cleared_entries": n}
+
+    @app.post("/admin/language/{lang}")
+    async def admin_set_language(lang: str):
+        lang_lower = lang.lower()
+        if lang_lower not in ("en", "it"):
+            raise HTTPException(status_code=400, detail="Language must be 'en' or 'it'")
+        set_current_language(lang_lower)
+        app.state.language = lang_lower
+        log.info("Language changed to %s", lang_lower)
+        return {"ok": True, "language": lang_lower}
 
     @app.get("/admin/config")
     async def admin_config():
@@ -402,16 +412,20 @@ def create_app(
 
 
 INDEX_HTML = """<!doctype html>
-<html lang="it">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Vaillant Smart Server</title>
+<title id="page-title">Vaillant Smart Server</title>
 <style>
   body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
          max-width: 900px; margin: 2em auto; padding: 0 1em; color: #222; background: #fafafa; }
-  h1 { margin-bottom: .2em; }
+  .header-row { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; margin-bottom: .4em; }
+  h1 { margin: 0; }
   h1 small { color: #888; font-size: .55em; font-weight: normal; }
+  .lang-bar { display: flex; gap: .4em; align-items: center; }
+  .lang-bar button { padding: .35em .75em; font-size: .88em; border: 1px solid #ccc; background: #fff; cursor: pointer; border-radius: 4px; }
+  .lang-bar button.active { background: #2c7; color: white; border-color: #2a6; font-weight: 600; }
   h2 { border-bottom: 1px solid #ddd; padding-bottom: .3em; margin-top: 1.5em; }
   .panel { background: white; padding: 1em 1.2em; border-radius: 8px; margin: 1em 0;
            box-shadow: 0 1px 3px rgba(0,0,0,.05); }
@@ -452,65 +466,66 @@ INDEX_HTML = """<!doctype html>
 </head>
 <body>
 
-<h1>Vaillant Smart Server <small>v0.2.0</small></h1>
-
-<div id="quota-banner" class="quota-banner">
-  &#9888; Vaillant ha esaurito la quota API. Auto-resume tra <span id="quota-time">--:--:--</span>.
-  L'upstream e' stato messo OFF automaticamente; al replenish il server ri-abilita da solo.
-  Manualmente puoi forzare l'abilitazione (Enable) o tenerla OFF (Disable) — entrambi annullano il timer auto-resume.
+<div class="header-row">
+  <h1>Vaillant Smart Server <small>v0.2.0</small></h1>
+  <div class="lang-bar">
+    <button id="lang-btn-it" onclick="setLanguage('it')">&#127470;&#127481; Italiano</button>
+    <button id="lang-btn-en" onclick="setLanguage('en')">&#127468;&#127463; English</button>
+  </div>
 </div>
 
+<div id="quota-banner" class="quota-banner"></div>
+
 <div class="panel">
-  <h2>Stato</h2>
+  <h2 id="status-heading">Status</h2>
   <p>
-    Master upstream:
-    <span id="master-state" class="pill unknown">caricamento...</span>
+    <span id="master-label">Master upstream:</span>
+    <span id="master-state" class="pill unknown">loading...</span>
     <button id="btn-enable" class="primary" onclick="enableMaster()">Enable</button>
     <button id="btn-disable" class="danger" onclick="disableMaster()">Disable</button>
   </p>
-  <p><small class="muted">Quando OFF, il server serve solo dalla cache (anche scaduta) e <strong>non chiama Vaillant</strong>.
-    Usalo per liberare l'API mentre usi l'app myVaillant ufficiale o quando hai sforato la quota.</small></p>
+  <p><small class="muted" id="status-subtext"></small></p>
 </div>
 
 <div class="panel">
-  <h2>Modes and Presets</h2>
+  <h2 id="presets-heading">Modes and Presets</h2>
   <p>
-    Activate heating / DHW program:
-    <button onclick="applyPreset('AT_HOME')">At Home</button>
-    <button onclick="applyPreset('HOLIDAY')">Holiday</button>
-    <button onclick="applyPreset('COMING_BACK')">Coming Back</button>
+    <span id="presets-desc">Activate heating / DHW program:</span>
+    <button id="btn-preset-at-home" onclick="applyPreset('AT_HOME')">At Home</button>
+    <button id="btn-preset-holiday" onclick="applyPreset('HOLIDAY')">Holiday</button>
+    <button id="btn-preset-coming-back" onclick="applyPreset('COMING_BACK')">Coming Back</button>
   </p>
 </div>
 
 <div class="panel">
-  <h2>Domestic Hot Water (DHW)</h2>
+  <h2 id="dhw-heading">Domestic Hot Water (DHW)</h2>
   <p>
-    Set temperature:
+    <span id="dhw-label">Set temperature:</span>
     <input type="number" id="dhw-temp-input" value="50" min="35" max="65" step="1" style="width: 4.5em; padding: .35em; border: 1px solid #ccc; border-radius: 4px;">&deg;C
-    <button onclick="setDhwTemp(0)">Set DHW</button>
+    <button id="btn-set-dhw" onclick="setDhwTemp(0)">Set DHW</button>
   </p>
 </div>
 
 <div class="panel">
-  <h2>Zone</h2>
-  <button onclick="refreshZones()">&#8635; Ricarica</button>
-  <div id="zones-list"><em>caricamento...</em></div>
-  <p><small class="muted">Questi sono i valori esatti che il server ritorna. Se OH mostra qualcosa di diverso, e' il binding HTTP che non ha ancora finito un refresh — entro 30s sara' allineato.</small></p>
+  <h2 id="zones-heading">Zones</h2>
+  <button id="btn-reload-zones" onclick="refreshZones()">&#8635; Reload</button>
+  <div id="zones-list"><em>loading...</em></div>
+  <p><small class="muted" id="zones-subtext"></small></p>
 </div>
 
 <div class="panel">
-  <h2>Cache</h2>
-  <button onclick="refreshCache()">&#8635; Ricarica</button>
-  <button class="danger" onclick="clearCache()">&#128465; Svuota cache</button>
+  <h2 id="cache-heading">Cache</h2>
+  <button id="btn-reload-cache" onclick="refreshCache()">&#8635; Reload</button>
+  <button id="btn-clear-cache" class="danger" onclick="clearCache()">&#128465; Clear cache</button>
   <table id="cache-table">
-    <thead><tr><th>Chiave</th><th>Eta'</th><th>TTL</th><th>Stato</th></tr></thead>
-    <tbody><tr><td colspan="4"><em>caricamento...</em></td></tr></tbody>
+    <thead><tr><th id="th-key">Key</th><th id="th-age">Age</th><th id="th-ttl">TTL</th><th id="th-status">Status</th></tr></thead>
+    <tbody><tr><td colspan="4"><em>loading...</em></td></tr></tbody>
   </table>
-  <p><small class="muted">Le entry "scadute" sono ancora servite (serve-stale) ma al prossimo accesso il server tenta un fetch fresh da Vaillant.</small></p>
+  <p><small class="muted" id="cache-subtext"></small></p>
 </div>
 
 <div class="panel">
-  <h2>Probe endpoint</h2>
+  <h2 id="probe-heading">Probe endpoints</h2>
   <p>
     <button onclick="probe('/zone-info/0')">/zone-info/0</button>
     <button onclick="probe('/zone-info/1')">/zone-info/1</button>
@@ -524,10 +539,199 @@ INDEX_HTML = """<!doctype html>
     <button onclick="probe('/get-device-data')">/get-device-data</button>
     <button onclick="probe('/get-rts')">/get-rts</button>
   </p>
-  <pre id="probe-out">(clicca un endpoint per vederne la risposta)</pre>
+  <pre id="probe-out">(click an endpoint to see its response)</pre>
 </div>
 
 <script>
+const I18N = {
+  en: {
+    title: "Vaillant Smart Server",
+    quotaBannerHtml: '&#9888; Vaillant API quota exceeded. Auto-resume in <span id="quota-time">--:--:--</span>. Upstream has been automatically disabled (OFF); the server will automatically re-enable when quota is replenished. You can manually force Enable or keep it OFF (Disable) \u2014 both cancel the auto-resume timer.',
+    quotaProbeHeader: '\\n\\n\\u26A0 VAILLANT QUOTA EXCEEDED. Replenish in ',
+    statusHeading: "Status",
+    masterUpstream: "Master upstream:",
+    btnEnable: "Enable",
+    btnDisable: "Disable",
+    statusSubtext: "When OFF, the server only serves from cache (even expired) and <strong>does not call Vaillant</strong>. Use it to free up the API while using the official myVaillant app or when quota is exceeded.",
+    presetsHeading: "Modes and Presets",
+    presetsDesc: "Activate heating / DHW program:",
+    btnAtHome: "At Home",
+    btnHoliday: "Holiday",
+    btnComingBack: "Coming Back",
+    dhwHeading: "Domestic Hot Water (DHW)",
+    dhwLabel: "Set temperature:",
+    btnSetDhw: "Set DHW",
+    zonesHeading: "Zones",
+    btnReload: "&#8635; Reload",
+    zonesSubtext: "These are the exact values returned by the server. If OpenHAB shows something different, the HTTP binding has not completed a refresh yet \u2014 it will sync within 30s.",
+    cacheHeading: "Cache",
+    btnClearCache: "&#128465; Clear cache",
+    colKey: "Key",
+    colAge: "Age",
+    colTtl: "TTL",
+    colStatus: "Status",
+    cacheEmpty: "empty cache",
+    statusFresh: "fresh",
+    statusExpired: "expired",
+    cacheSubtext: 'Expired entries are still served (serve-stale), but on next access the server will attempt a fresh fetch from Vaillant.',
+    probeHeading: "Probe endpoints",
+    probeHint: "(click an endpoint to see its response)",
+    emptyBody: "(empty body)",
+    labelTemp: "Temperature",
+    labelSetpoint: "Setpoint",
+    labelMode: "Mode",
+    modeOff: "Off",
+    modeManual: "Manual",
+    modeSchedule: "Schedule",
+    btnSet: "Set",
+    manualRequired: "(requires Manual mode)",
+    loading: "loading...",
+    unreachable: "unreachable",
+    confirmClearCache: "Clear ENTIRE cache? Subsequent calls will fetch fresh data from Vaillant.",
+    confirmPreset: function(mode) { return 'Activate preset ' + mode + '?'; },
+    alertPresetSuccess: function(mode) { return 'Preset ' + mode + ' applied successfully!'; },
+    alertDhwSuccess: function(val) { return 'DHW temperature set to ' + val + '\u00B0C'; },
+    alertInvalidTemp: function(val) { return 'Invalid temperature: ' + val; },
+    alertInvalidSetpoint: function(val) { return 'Invalid setpoint: ' + val; },
+    alertError: function(status, body) { return 'Error ' + status + ': ' + JSON.stringify(body); },
+    unexpectedZones: function(zs) { return 'Unexpected response from /zones: ' + JSON.stringify(zs); },
+    zoneFallback: function(idx) { return 'Zone ' + idx; },
+    errorPrefix: "error: "
+  },
+  it: {
+    title: "Vaillant Smart Server",
+    quotaBannerHtml: '&#9888; Vaillant ha esaurito la quota API. Auto-resume tra <span id="quota-time">--:--:--</span>. L\\\'upstream e\\\' stato messo OFF automaticamente; al replenish il server ri-abilita da solo. Manualmente puoi forzare l\\\'abilitazione (Abilita) o tenerla OFF (Disabilita) \u2014 entrambi annullano il timer auto-resume.',
+    quotaProbeHeader: '\\n\\n\\u26A0 VAILLANT QUOTA ESAURITA. Replenish in ',
+    statusHeading: "Stato",
+    masterUpstream: "Master upstream:",
+    btnEnable: "Abilita",
+    btnDisable: "Disabilita",
+    statusSubtext: "Quando OFF, il server serve solo dalla cache (anche scaduta) e <strong>non chiama Vaillant</strong>. Usalo per liberare l'API mentre usi l'app myVaillant ufficiale o quando hai sforato la quota.",
+    presetsHeading: "Modalit\u00E0 e Preset",
+    presetsDesc: "Attiva programma riscaldamento / ACS:",
+    btnAtHome: "A Casa",
+    btnHoliday: "Vacanza",
+    btnComingBack: "Rientro",
+    dhwHeading: "Acqua Calda Sanitaria (ACS)",
+    dhwLabel: "Imposta temperatura:",
+    btnSetDhw: "Imposta ACS",
+    zonesHeading: "Zone",
+    btnReload: "&#8635; Ricarica",
+    zonesSubtext: "Questi sono i valori esatti che il server ritorna. Se OH mostra qualcosa di diverso, e' il binding HTTP che non ha ancora finito un refresh \u2014 entro 30s sara' allineato.",
+    cacheHeading: "Cache",
+    btnClearCache: "&#128465; Svuota cache",
+    colKey: "Chiave",
+    colAge: "Eta'",
+    colTtl: "TTL",
+    colStatus: "Stato",
+    cacheEmpty: "cache vuota",
+    statusFresh: "fresca",
+    statusExpired: "scaduta",
+    cacheSubtext: 'Le entry "scadute" sono ancora servite (serve-stale) ma al prossimo accesso il server tenta un fetch fresh da Vaillant.',
+    probeHeading: "Endpoint probe",
+    probeHint: "(clicca un endpoint per vederne la risposta)",
+    emptyBody: "(body vuoto)",
+    labelTemp: "Temperatura",
+    labelSetpoint: "Setpoint",
+    labelMode: "Modalit\u00E0",
+    modeOff: "Off",
+    modeManual: "Manuale",
+    modeSchedule: "Programma",
+    btnSet: "Imposta",
+    manualRequired: "(richiede modalit\u00E0 Manuale)",
+    loading: "caricamento...",
+    unreachable: "non raggiungibile",
+    confirmClearCache: "Svuotare TUTTA la cache? Le prossime chiamate andranno fresh a Vaillant.",
+    confirmPreset: function(mode) { return 'Attivare preset ' + mode + '?'; },
+    alertPresetSuccess: function(mode) { return 'Preset ' + mode + ' applicato con successo!'; },
+    alertDhwSuccess: function(val) { return 'Temperatura ACS impostata a ' + val + '\u00B0C'; },
+    alertInvalidTemp: function(val) { return 'Temperatura non valida: ' + val; },
+    alertInvalidSetpoint: function(val) { return 'Setpoint non valido: ' + val; },
+    alertError: function(status, body) { return 'Errore ' + status + ': ' + JSON.stringify(body); },
+    unexpectedZones: function(zs) { return 'Risposta inattesa da /zones: ' + JSON.stringify(zs); },
+    zoneFallback: function(idx) { return 'Zona ' + idx; },
+    errorPrefix: "errore: "
+  }
+};
+
+const SERVER_LANG = "__SERVER_LANG__";
+let currentLang = "en";
+try {
+  currentLang = localStorage.getItem('vaillant_lang') || (SERVER_LANG === 'it' ? 'it' : 'en');
+} catch (e) {
+  currentLang = (SERVER_LANG === 'it') ? 'it' : 'en';
+}
+
+function applyLanguageUI() {
+  document.documentElement.lang = currentLang;
+
+  const btnIt = document.getElementById('lang-btn-it');
+  const btnEn = document.getElementById('lang-btn-en');
+  if (btnIt && btnEn) {
+    btnIt.className = (currentLang === 'it') ? 'active' : '';
+    btnEn.className = (currentLang === 'en') ? 'active' : '';
+  }
+
+  const t = I18N[currentLang];
+  const setTxt = function(id, txt) { const el = document.getElementById(id); if (el) el.textContent = txt; };
+  const setHtml = function(id, html) { const el = document.getElementById(id); if (el) el.innerHTML = html; };
+
+  setTxt('page-title', t.title);
+  setTxt('status-heading', t.statusHeading);
+  setTxt('master-label', t.masterUpstream);
+  setTxt('btn-enable', t.btnEnable);
+  setTxt('btn-disable', t.btnDisable);
+  setHtml('status-subtext', t.statusSubtext);
+
+  setTxt('presets-heading', t.presetsHeading);
+  setTxt('presets-desc', t.presetsDesc);
+  setTxt('btn-preset-at-home', t.btnAtHome);
+  setTxt('btn-preset-holiday', t.btnHoliday);
+  setTxt('btn-preset-coming-back', t.btnComingBack);
+
+  setTxt('dhw-heading', t.dhwHeading);
+  setTxt('dhw-label', t.dhwLabel);
+  setTxt('btn-set-dhw', t.btnSetDhw);
+
+  setTxt('zones-heading', t.zonesHeading);
+  setHtml('btn-reload-zones', t.btnReload);
+  setHtml('zones-subtext', t.zonesSubtext);
+
+  setTxt('cache-heading', t.cacheHeading);
+  setHtml('btn-reload-cache', t.btnReload);
+  setHtml('btn-clear-cache', t.btnClearCache);
+  setTxt('th-key', t.colKey);
+  setTxt('th-age', t.colAge);
+  setTxt('th-ttl', t.colTtl);
+  setTxt('th-status', t.colStatus);
+  setHtml('cache-subtext', t.cacheSubtext);
+
+  setTxt('probe-heading', t.probeHeading);
+  const probeOut = document.getElementById('probe-out');
+  if (probeOut && (probeOut.textContent.startsWith('(') || probeOut.textContent === '')) {
+    probeOut.textContent = t.probeHint;
+  }
+
+  const banner = document.getElementById('quota-banner');
+  if (banner && banner.classList.contains('show')) {
+    const qTimeEl = document.getElementById('quota-time');
+    const curTime = qTimeEl ? qTimeEl.textContent : '--:--:--';
+    banner.innerHTML = t.quotaBannerHtml;
+    const newTime = document.getElementById('quota-time');
+    if (newTime) newTime.textContent = curTime;
+  }
+}
+
+function setLanguage(lang) {
+  currentLang = (lang === 'it') ? 'it' : 'en';
+  try { localStorage.setItem('vaillant_lang', currentLang); } catch (e) {}
+  fetch('/admin/language/' + currentLang, { method: 'POST' }).catch(function() {});
+  applyLanguageUI();
+  refreshStatus();
+  refreshCache();
+  refreshZones();
+}
+
 function formatHMS(totalSec) {
   totalSec = Math.max(0, Math.floor(totalSec));
   const h = Math.floor(totalSec / 3600);
@@ -537,6 +741,7 @@ function formatHMS(totalSec) {
 }
 
 async function refreshStatus() {
+  const t = I18N[currentLang];
   try {
     const r = await fetch('/healthz');
     const d = await r.json();
@@ -544,33 +749,34 @@ async function refreshStatus() {
     if (d.enabled) { el.textContent = 'ON';  el.className = 'pill on'; }
     else            { el.textContent = 'OFF'; el.className = 'pill off'; }
 
-    // Aggiorna il banner auto-resume
+    // Update auto-resume banner
     if (typeof d.quota_resume_in_seconds === 'number' && d.quota_resume_in_seconds > 0) {
       showQuotaBanner(formatHMS(d.quota_resume_in_seconds));
     } else {
       hideQuotaBanner();
     }
   } catch (e) {
-    document.getElementById('master-state').textContent = 'unreachable';
+    document.getElementById('master-state').textContent = t.unreachable;
   }
 }
 async function enableMaster()  { await fetch('/admin/enable',  { method: 'POST' }); refreshStatus(); }
 async function disableMaster() { await fetch('/admin/disable', { method: 'POST' }); refreshStatus(); }
 
 async function refreshCache() {
+  const t = I18N[currentLang];
   try {
     const r = await fetch('/admin/cache');
     const d = await r.json();
     const tbody = document.querySelector('#cache-table tbody');
     const keys = Object.keys(d).sort();
     if (keys.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="4"><em>cache vuota</em></td></tr>';
+      tbody.innerHTML = '<tr><td colspan="4"><em>' + t.cacheEmpty + '</em></td></tr>';
       return;
     }
-    tbody.innerHTML = keys.map(k => {
+    tbody.innerHTML = keys.map(function(k) {
       const v = d[k];
       const cls = v.expired ? 'expired' : 'fresh';
-      const txt = v.expired ? 'scaduta' : 'fresca';
+      const txt = v.expired ? t.statusExpired : t.statusFresh;
       return '<tr>' +
         '<td><code>' + k + '</code></td>' +
         '<td>' + Math.round(v.age_seconds) + 's</td>' +
@@ -580,19 +786,23 @@ async function refreshCache() {
     }).join('');
   } catch (e) {
     document.querySelector('#cache-table tbody').innerHTML =
-      '<tr><td colspan="4">errore: ' + e.message + '</td></tr>';
+      '<tr><td colspan="4">' + t.errorPrefix + e.message + '</td></tr>';
   }
 }
 
 async function clearCache() {
-  if (!confirm('Svuotare TUTTA la cache? Le prossime chiamate andranno fresh a Vaillant.')) return;
+  const t = I18N[currentLang];
+  if (!confirm(t.confirmClearCache)) return;
   await fetch('/admin/clear-cache', { method: 'POST' });
   refreshCache();
 }
 
 function showQuotaBanner(replenishIn) {
   const el = document.getElementById('quota-banner');
-  document.getElementById('quota-time').textContent = replenishIn || '--:--:--';
+  const t = I18N[currentLang];
+  el.innerHTML = t.quotaBannerHtml;
+  const timeSpan = document.getElementById('quota-time');
+  if (timeSpan) timeSpan.textContent = replenishIn || '--:--:--';
   el.classList.add('show');
 }
 function hideQuotaBanner() {
@@ -600,7 +810,6 @@ function hideQuotaBanner() {
 }
 
 async function handleResponse(r) {
-  // restituisce {ok, status, body, quotaReplenish}
   const text = await r.text();
   let body = null;
   try { body = JSON.parse(text); } catch (e) { body = text; }
@@ -611,70 +820,78 @@ async function handleResponse(r) {
   } else if (r.ok) {
     hideQuotaBanner();
   }
-  return { ok: r.ok, status: r.status, body, quotaReplenish };
+  return { ok: r.ok, status: r.status, body: body, quotaReplenish: quotaReplenish };
 }
 
 const MODE_PILL = { OFF: 'off', MANUAL: 'on', TIME_CONTROLLED: 'fresh' };
-const MODE_LABEL = { off: 'Off', manual: 'Manuale', time_controlled: 'Programma' };
 
 async function refreshZones() {
+  const t = I18N[currentLang];
   const out = document.getElementById('zones-list');
   try {
     const zsR = await fetch('/zones');
     const zs = await zsR.json();
     if (!Array.isArray(zs)) {
-      out.textContent = 'risposta inattesa da /zones: ' + JSON.stringify(zs);
+      out.textContent = t.unexpectedZones(zs);
       return;
     }
-    const infos = await Promise.all(zs.map(z =>
-      fetch('/zone-info/' + z.index).then(r => r.json())
-    ));
-    out.innerHTML = zs.map((z, i) => renderZone(z, infos[i])).join('');
+    const infos = await Promise.all(zs.map(function(z) {
+      return fetch('/zone-info/' + z.index).then(function(r) { return r.json(); });
+    }));
+    out.innerHTML = zs.map(function(z, i) { return renderZone(z, infos[i]); }).join('');
   } catch (e) {
-    out.textContent = 'errore: ' + e.message;
+    out.textContent = t.errorPrefix + e.message;
   }
 }
 
 function renderZone(z, info) {
+  const t = I18N[currentLang];
   const idx = z.index;
-  const mode = (info && info.heating_state) || '?';
-  const pillCls = MODE_PILL[mode] || 'unknown';
+  const rawMode = (info && info.heating_state) || '?';
+  const modeLower = String(rawMode).toLowerCase();
+  const pillCls = MODE_PILL[String(rawMode).toUpperCase()] || 'unknown';
+  let modeLabel = rawMode;
+  if (modeLower === 'off') modeLabel = t.modeOff;
+  else if (modeLower === 'manual') modeLabel = t.modeManual;
+  else if (modeLower === 'time_controlled') modeLabel = t.modeSchedule;
+
   const curT = info && typeof info.current_temperature === 'number'
-    ? info.current_temperature.toFixed(2) + ' °C' : '?';
+    ? info.current_temperature.toFixed(2) + ' \u00B0C' : '?';
   const spT  = info && typeof info.desired_temperature === 'number'
-    ? info.desired_temperature.toFixed(1) + ' °C' : '?';
-  const name = z.name || ('Zone ' + idx);
+    ? info.desired_temperature.toFixed(1) + ' \u00B0C' : '?';
+  const name = z.name || t.zoneFallback(idx);
   const spVal = (info && typeof info.desired_temperature === 'number') ? info.desired_temperature : 20;
-  // Template literals (backticks) per evitare guai di escaping con apostrofi italiani.
+
   return `
     <div class="zone-card" id="zone-${idx}">
       <h3>${name} <small class="muted">[idx=${idx}]</small></h3>
       <div class="zone-row">
-        <div><span class="label">Temperatura</span><span class="val">${curT}</span></div>
-        <div><span class="label">Setpoint</span><span class="val">${spT}</span></div>
-        <div><span class="label">Modalita</span><span class="pill ${pillCls}">${mode}</span></div>
+        <div><span class="label">${t.labelTemp}</span><span class="val">${curT}</span></div>
+        <div><span class="label">${t.labelSetpoint}</span><span class="val">${spT}</span></div>
+        <div><span class="label">${t.labelMode}</span><span class="pill ${pillCls}">${modeLabel}</span></div>
       </div>
       <div class="zone-actions">
-        Modalita:
-        <button onclick="setZoneMode(${idx}, 'off')">Off</button>
-        <button onclick="setZoneMode(${idx}, 'manual')">Manuale</button>
-        <button onclick="setZoneMode(${idx}, 'time_controlled')">Programma</button>
+        ${t.labelMode}:
+        <button onclick="setZoneMode(${idx}, 'off')">${t.modeOff}</button>
+        <button onclick="setZoneMode(${idx}, 'manual')">${t.modeManual}</button>
+        <button onclick="setZoneMode(${idx}, 'time_controlled')">${t.modeSchedule}</button>
       </div>
       <div class="zone-actions">
-        Setpoint:
+        ${t.labelSetpoint}:
         <input type="number" id="sp-${idx}" value="${spVal}" step="0.5" min="5" max="30">&deg;C
-        <button onclick="setZoneSetpoint(${idx})">Imposta</button>
-        <small class="muted">(richiede modalita Manuale)</small>
+        <button onclick="setZoneSetpoint(${idx})">${t.btnSet}</button>
+        <small class="muted">${t.manualRequired}</small>
       </div>
     </div>
   `;
 }
 
 async function setZoneMode(idx, mode) {
+  const t = I18N[currentLang];
   const r = await fetch('/zone-update/' + idx + '/' + mode);
   const res = await handleResponse(r);
   if (!res.ok) {
-    alert('Errore ' + res.status + ': ' + JSON.stringify(res.body));
+    alert(t.alertError(res.status, res.body));
     return;
   }
   setTimeout(refreshZones, 500);
@@ -682,15 +899,16 @@ async function setZoneMode(idx, mode) {
 }
 
 async function setZoneSetpoint(idx) {
+  const t = I18N[currentLang];
   const val = document.getElementById('sp-' + idx).value;
   if (!val || isNaN(parseFloat(val))) {
-    alert('setpoint non valido: ' + val);
+    alert(t.alertInvalidSetpoint(val));
     return;
   }
   const r = await fetch('/zone-set-temp/' + idx + '/' + val);
   const res = await handleResponse(r);
   if (!res.ok) {
-    alert('Errore ' + res.status + ': ' + JSON.stringify(res.body));
+    alert(t.alertError(res.status, res.body));
     return;
   }
   setTimeout(refreshZones, 500);
@@ -698,35 +916,38 @@ async function setZoneSetpoint(idx) {
 }
 
 async function applyPreset(mode) {
-  if (!confirm('Activate preset ' + mode + '?')) return;
+  const t = I18N[currentLang];
+  if (!confirm(t.confirmPreset(mode))) return;
   const r = await fetch('/apply-preset/' + mode);
   const res = await handleResponse(r);
   if (!res.ok) {
-    alert('Error ' + res.status + ': ' + JSON.stringify(res.body));
+    alert(t.alertError(res.status, res.body));
     return;
   }
-  alert('Preset ' + mode + ' applied successfully!');
+  alert(t.alertPresetSuccess(mode));
   setTimeout(refreshZones, 500);
   setTimeout(refreshCache, 800);
 }
 
 async function setDhwTemp(idx) {
+  const t = I18N[currentLang];
   const val = document.getElementById('dhw-temp-input').value;
   if (!val || isNaN(parseFloat(val))) {
-    alert('Invalid temperature: ' + val);
+    alert(t.alertInvalidTemp(val));
     return;
   }
   const r = await fetch('/dhw-set-temp/' + idx + '/' + val);
   const res = await handleResponse(r);
   if (!res.ok) {
-    alert('Error ' + res.status + ': ' + JSON.stringify(res.body));
+    alert(t.alertError(res.status, res.body));
     return;
   }
-  alert('DHW temperature set to ' + val + '°C');
+  alert(t.alertDhwSuccess(val));
   setTimeout(refreshCache, 800);
 }
 
 async function probe(path) {
+  const t = I18N[currentLang];
   const out = document.getElementById('probe-out');
   out.textContent = 'GET ' + path + '\\n...';
   const t0 = performance.now();
@@ -736,7 +957,7 @@ async function probe(path) {
     const text = await r.text();
     let pretty;
     try { pretty = JSON.stringify(JSON.parse(text), null, 2); }
-    catch (e) { pretty = text || '(body vuoto)'; }
+    catch (e) { pretty = text || t.emptyBody; }
 
     let header = 'GET ' + path + '\\nHTTP ' + r.status + '  in ' + dt + 'ms';
     if (r.status === 429) {
@@ -745,7 +966,7 @@ async function probe(path) {
         const replenish = d.detail && d.detail.replenish_in;
         if (replenish) {
           showQuotaBanner(replenish);
-          header += '\\n\\n\\u26A0 VAILLANT QUOTA ESAURITA. Replenish in ' + replenish;
+          header += t.quotaProbeHeader + replenish;
         }
       } catch (e) {}
     } else if (r.status === 200 && path.startsWith('/zone-info')) {
@@ -755,10 +976,14 @@ async function probe(path) {
     out.textContent = header + '\\n\\n' + pretty;
     refreshCache();
   } catch (e) {
-    out.textContent = 'errore: ' + e.message;
+    out.textContent = t.errorPrefix + e.message;
   }
 }
 
+if (currentLang !== SERVER_LANG) {
+  fetch('/admin/language/' + currentLang, { method: 'POST' }).catch(function() {});
+}
+applyLanguageUI();
 refreshStatus();
 refreshCache();
 refreshZones();
@@ -769,7 +994,6 @@ setInterval(refreshZones, 30000);
 </body>
 </html>
 """
-
 
 def get_app() -> FastAPI:
     return create_app()
